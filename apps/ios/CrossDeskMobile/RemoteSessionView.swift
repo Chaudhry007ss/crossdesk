@@ -879,6 +879,7 @@ private final class RemoteKeyboardFeedback: ObservableObject {
 
 private enum RemoteComputerKeyAction {
     case stroke(UInt)
+    case chord(UInt, [UInt])
     case modifier(UInt)
     case switchKeyboard
     case dismiss
@@ -997,7 +998,8 @@ private enum RemoteComputerKeyboardPage: String, CaseIterable {
                  .init("F10", 0x79), .init("F11", 0x7A), .init("F12", 0x7B)],
                 [.init("Esc", 0x1B, style: .special), .init("Tab", 0x09, style: .special),
                  .init("Caps", 0x14), .init("Ins", 0x2D), .init("Del", 0x2E),
-                 .init("Home", 0x24), .init("End", 0x23)],
+                 .init("Home", 0x24), .init("End", 0x23),
+                 .init(NSLocalizedString("任务管理", comment: ""), style: .special, action: .chord(0x1B, [17, 16]))],
                 [shift, .init("←", 0x25), .init("↑", 0x26), .init("↓", 0x28),
                  .init("→", 0x27), .init("PgUp", 0x21), .init("PgDn", 0x22), backspace]
             ]
@@ -1180,6 +1182,9 @@ private struct RemoteComputerKeyboard: View {
             session.sendKeyChord(keyCode, modifiers: Array(activeModifiers.subtracting(lockedModifiers)))
             activeModifiers.removeAll()
             lastModifierTap = nil
+        case let .chord(keyCode, modifiers):
+            releaseModifiers()
+            session.sendKeyChord(keyCode, modifiers: modifiers)
         case .switchKeyboard:
             releaseModifiers()
             switchKeyboard()
@@ -1686,6 +1691,12 @@ private struct FloatingSessionMenu: View {
                         page = .networkStats
                     }
                     if session.remotePlatform == .windows {
+                        FloatingControlButton(title: NSLocalizedString("任务管理器", comment: ""),
+                                              symbol: "cpu",
+                                              action: {
+                                                  UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                  session.sendKeyChord(0x1B, modifiers: [17, 16])
+                                              })
                         FloatingControlButton(title: "Ctrl+Alt+Del",
                                               symbol: "lock.trianglebadge.exclamationmark",
                                               action: session.sendSecureAttention)

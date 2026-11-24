@@ -11,7 +11,11 @@ struct RemoteShortcutPanel: View {
     private let groups = ["common", "keys", "system", "mine"]
     private let labels = ["常用", "按键", "系统", "我的"]
     private var platform: String { session.remotePlatform.rawValue }
-    private var items: [RemoteShortcut] { store.items(platform: platform).filter { $0.group == category } }
+    private var items: [RemoteShortcut] {
+        store.items(platform: platform).filter {
+            $0.group == category || (category == "common" && $0.id == "task")
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {

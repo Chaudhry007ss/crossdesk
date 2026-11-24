@@ -266,6 +266,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
     private var viewportScale: CGFloat = 1
     private var viewportOffset = CGSize.zero
     private var edgePanned = false
+    private var followMousePanned = false
     private var needsViewportRestore = true
     private var pinchActive = false
     private let basePointerSpeed: CGFloat = 1.35
@@ -442,9 +443,19 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         viewportBeforeKeyboard = nil
         // Keep the user's own zoom if they changed it while typing.
         guard abs(saved.scale - viewportScale) < 0.001 else { return }
-        edgePanned = saved.edgePanned
-        viewportOffset = constrainedViewportOffset(saved.offset, scale: viewportScale)
-        publishViewport()
+        // keyboardRevision changes during SwiftUI's updateUIView pass; publish
+        // on the next run-loop turn so SwiftUI does not warn about state mutation.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.keyboardRevision.isEmpty else { return }
+            guard abs(saved.scale - self.viewportScale) < 0.001 else { return }
+            self.edgePanned = saved.edgePanned
+            self.viewportOffset = self.constrainedViewportOffset(saved.offset,
+                                                                 scale: self.viewportScale)
+            self.publishViewport()
+            if self.followMouse != nil {
+                self.adjustViewportForFollowMouse(allowRelax: true)
+            }
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -473,7 +484,10 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
     func setViewport(scale: CGFloat, offset: CGSize) {
         let nextScale = min(max(scale, 1), maximumViewportScale)
         viewportScale = nextScale
-        if nextScale == 1 && offset == .zero { edgePanned = false }
+        if nextScale == 1 && offset == .zero {
+            edgePanned = false
+            followMousePanned = false
+        }
         viewportOffset = offset
         if needsViewportRestore { restoreEdgePanAllowance() }
         setNeedsLayout()
@@ -517,23 +531,127 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Cursor-following virtual mouse
 
+    private var followMouseSize: CGSize {
+        CGSize(width: FollowMouseView.baseSize.width * followMouseScale,
+               height: FollowMouseView.baseSize.height * followMouseScale)
+    }
+
+    /// Space below and right of the cursor tip needed to keep the full fused
+    /// mouse (left/right buttons, wheel, and drag body) inside the screen.
+    private var followMousePadding: CGSize {
+        guard followMouse != nil else { return .zero }
+        let offset = FollowMouseView.tipOffset * followMouseScale
+        let margin: CGFloat = 8
+        let size = followMouseSize
+        return CGSize(width: offset + size.width + margin,
+                      height: offset + size.height + margin)
+    }
+
     func updateFollowMouse(visible: Bool, scale: CGFloat, opacity: CGFloat) {
         guard visible, let mouseInput else {
             if let mouse = followMouse {
                 mouse.removeFromSuperview()
                 followMouse = nil
                 mouse.input.releaseAll()
+                if followMousePanned && keyboardRevision.isEmpty {
+                    followMousePanned = false
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.followMouse == nil,
+                              self.keyboardRevision.isEmpty else { return }
+                        if self.viewportScale <= 1.001 {
+                            self.edgePanned = false
+                            self.viewportOffset = .zero
+                        } else {
+                            self.viewportOffset = self.constrainedViewportOffset(
+                                self.viewportOffset, scale: self.viewportScale)
+                        }
+                        self.publishViewport()
+                    }
+                }
             }
             return
         }
+        let justCreated = followMouse == nil
         if followMouse == nil {
             let mouse = FollowMouseView(input: mouseInput)
             addSubview(mouse)
             followMouse = mouse
         }
         followMouse?.alpha = min(max(opacity, 0.2), 1)
-        followMouseScale = min(max(scale, 0.6), 1.5)
+        let clampedScale = min(max(scale, 0.6), 1.5)
+        let scaleChanged = abs(clampedScale - followMouseScale) > 0.001
+        followMouseScale = clampedScale
+        if justCreated || scaleChanged {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.adjustViewportForFollowMouse(allowRelax: false)
+                self.layoutFollowMouse()
+            }
+        }
         layoutFollowMouse()
+    }
+
+    /// Keeps the fused mouse completely onscreen when the cursor approaches the
+    /// bottom (e.g. taskbar) or right edge. At 1x zoom, smoothly relaxes back
+    /// to center as the cursor moves away from those edges.
+    private func adjustViewportForFollowMouse(allowRelax: Bool) {
+        guard followMouse != nil, keyboardRevision.isEmpty,
+              let baseRect = baseRenderRect(),
+              let rect = renderRect(),
+              rect.width > 0, rect.height > 0 else { return }
+        let leftMargin = max(RemoteVideoGeometry.pointerInset, safeAreaInsets.left + 8)
+        let topMargin = max(RemoteVideoGeometry.pointerInset, safeAreaInsets.top + 8)
+        let rightLimit = bounds.width - safeAreaInsets.right
+        let bottomLimit = bounds.height - safeAreaInsets.bottom
+        let pad = followMousePadding
+        let maxCursorX = max(leftMargin, rightLimit - pad.width)
+        let maxCursorY = max(topMargin, bottomLimit - pad.height)
+        let (nx, ny) = relativeCursorPoint
+
+        if viewportScale <= 1.001 {
+            let restX = baseRect.minX + CGFloat(nx) * baseRect.width
+            let restY = baseRect.minY + CGFloat(ny) * baseRect.height
+            let neededX = min(0, maxCursorX - restX)
+            let neededY = min(0, maxCursorY - restY)
+            let targetX = allowRelax ? neededX : min(viewportOffset.width, neededX)
+            let targetY = allowRelax ? neededY : min(viewportOffset.height, neededY)
+            if targetX == 0 && targetY == 0 {
+                guard followMousePanned || viewportOffset != .zero else { return }
+                edgePanned = false
+                followMousePanned = false
+                viewportOffset = .zero
+                publishViewport()
+            } else {
+                edgePanned = true
+                followMousePanned = true
+                let next = constrainedViewportOffset(CGSize(width: targetX, height: targetY),
+                                                     scale: viewportScale)
+                if next != viewportOffset {
+                    viewportOffset = next
+                    publishViewport()
+                }
+            }
+            return
+        }
+
+        let cursorX = rect.minX + CGFloat(nx) * rect.width
+        let cursorY = rect.minY + CGFloat(ny) * rect.height
+        var panX: CGFloat = 0
+        if cursorX < leftMargin {
+            panX = leftMargin - cursorX
+        } else if cursorX > maxCursorX {
+            panX = maxCursorX - cursorX
+        }
+        var panY: CGFloat = 0
+        if cursorY < topMargin {
+            panY = topMargin - cursorY
+        } else if cursorY > maxCursorY {
+            panY = maxCursorY - cursorY
+        }
+        if panX != 0 || panY != 0 {
+            followMousePanned = true
+            panForPointer(dx: panX, dy: panY)
+        }
     }
 
     private func layoutFollowMouse() {
@@ -543,8 +661,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
             return
         }
         mouse.isHidden = false
-        let size = CGSize(width: FollowMouseView.baseSize.width * followMouseScale,
-                          height: FollowMouseView.baseSize.height * followMouseScale)
+        let size = followMouseSize
         let (nx, ny) = relativeCursorPoint
         let cursor = CGPoint(x: rect.minX + CGFloat(nx) * rect.width,
                              y: rect.minY + CGFloat(ny) * rect.height)
@@ -552,11 +669,9 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         // the body hangs down-right of it, like a real mouse. It never flips.
         let offset = FollowMouseView.tipOffset * followMouseScale
         let margin: CGFloat = 4
-        // Near the right edge the body stops once only its left half remains,
-        // keeping the left button reachable; the tail then slants to keep
-        // pointing at the cursor. Vertically the body always stays below the
-        // tip and may slide under the bottom edge.
-        let maxX = max(margin, bounds.width - size.width * 0.5)
+        // Fallback clamp if the viewport cannot pan further (e.g. while a
+        // keyboard is open); the tail slants smoothly to keep pointing at the tip.
+        let maxX = max(margin, bounds.width - safeAreaInsets.right - size.width * 0.5)
         let x = min(cursor.x + offset, maxX)
         let y = cursor.y + offset
         let frame = CGRect(origin: CGPoint(x: x, y: y), size: size)
@@ -657,6 +772,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
             viewportScale = 1
             viewportOffset = .zero
             edgePanned = false
+            followMousePanned = false
             publishViewport()
             return
         }
@@ -706,7 +822,11 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
             guard let point = normalized(location) else { return }
             onMove?(point.0, point.1)
         default:
+            let wasViewportPan = singleFingerViewportPan
             singleFingerViewportPan = false
+            if !wasViewportPan && recognizer.state == .ended {
+                adjustViewportForFollowMouse(allowRelax: true)
+            }
         }
     }
 
@@ -749,6 +869,9 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
                 onLeftUp?(point.0, point.1)
             }
             heldDragPoint = nil
+            if recognizer.state == .ended {
+                adjustViewportForFollowMouse(allowRelax: true)
+            }
         default:
             break
         }
@@ -868,6 +991,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
                 viewportScale = 1
                 viewportOffset = .zero
                 edgePanned = false
+                followMousePanned = false
                 publishViewport()
                 return
             }
@@ -880,6 +1004,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
                 viewportScale = 1
                 viewportOffset = .zero
                 edgePanned = false
+                followMousePanned = false
                 publishViewport()
             }
         default:
@@ -1062,6 +1187,12 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         let (x, y) = relativeCursorPoint
         let nextX = Float(min(max(CGFloat(x) + delta.x / renderRect.width, 0), 1))
         let nextY = Float(min(max(CGFloat(y) + delta.y / renderRect.height, 0), 1))
+        if followMouse != nil && keyboardRevision.isEmpty {
+            relativeCursorPoint = (nextX, nextY)
+            adjustViewportForFollowMouse(allowRelax: true)
+            layoutFollowMouse()
+            return relativeCursorPoint
+        }
         let cursorY = renderRect.minY + CGFloat(y) * renderRect.height
         var panY = -RemoteVideoGeometry.verticalPointerOverflow(
             y: cursorY, dy: delta.y, visibleRect: renderRect.intersection(bounds))
@@ -1152,6 +1283,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         guard let baseRect = baseRenderRect() else { return offset }
         let horizontalInset = edgePanned && scale > 1.001 ? RemoteVideoGeometry.pointerInset : 0
         let maximumX = max(0, baseRect.width * (scale - 1) / 2) + horizontalInset
+        var minimumX = -maximumX
         var minimumY = -max(0, baseRect.height * (scale - 1) / 2)
         var maximumY = -minimumY
         if edgePanned {
@@ -1162,9 +1294,20 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
             let halfHeight = baseRect.height * scale / 2
             minimumY = visibleHeight - baseRect.midY - halfHeight
             maximumY = availableHeight - visibleHeight - baseRect.midY + halfHeight
+
+            if followMouse != nil {
+                let rightLimit = bounds.width - safeAreaInsets.right
+                let pad = followMousePadding
+                let halfWidth = baseRect.width * scale / 2
+                let minVisibleWidth = min(baseRect.width * scale,
+                                          rightLimit * minimumVisibleHeightFraction)
+                let targetRight = max(minVisibleWidth, rightLimit - pad.width)
+                let followMinX = targetRight - baseRect.midX - halfWidth
+                minimumX = min(minimumX, followMinX)
+            }
         }
         return CGSize(
-            width: min(max(offset.width, -maximumX), maximumX),
+            width: min(max(offset.width, minimumX), maximumX),
             height: min(max(offset.height, minimumY), maximumY)
         )
     }

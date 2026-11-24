@@ -114,7 +114,10 @@ final class RemoteShortcutStore: ObservableObject {
         return result + custom.filter { $0.platform == platform }
     }
     func pins(platform: String) -> [String] {
-        let values = defaults.stringArray(forKey: prefix + "pins_" + platform) ?? ["esc", "tab", "copy", "paste"]
+        let fallback = platform == "windows"
+            ? ["esc", "tab", "copy", "paste", "task"]
+            : ["esc", "tab", "copy", "paste"]
+        let values = defaults.stringArray(forKey: prefix + "pins_" + platform) ?? fallback
         let available = Set(items(platform: platform).map(\.id))
         var seen = Set<String>()
         return Array(values.filter { available.contains($0) && seen.insert($0).inserted }.prefix(8))
