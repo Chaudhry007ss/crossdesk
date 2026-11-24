@@ -184,7 +184,7 @@ struct RemoteGestureGuide: View {
             Item(symbol: "rectangle.on.rectangle", gesture: NSLocalizedString("三指左右滑", comment: ""),
                  action: NSLocalizedString("切换显示器", comment: "")),
             Item(symbol: "computermouse", gesture: NSLocalizedString("虚拟鼠标", comment: ""),
-                 action: NSLocalizedString("拖动鼠标身体移动光标；轻点滚轮为中键；点锁可单指拖拽", comment: "")),
+                 action: NSLocalizedString("拖动鼠标身体移动光标；按住左键再滑动即拖拽；轻点滚轮为中键", comment: "")),
         ]
     }
 

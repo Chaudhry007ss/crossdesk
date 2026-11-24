@@ -261,15 +261,18 @@ private final class VirtualMouseWheelView: UIView {
 // MARK: - Shared virtual mouse parts
 
 /// Toggles a held left button so a single finger can drag files or select text.
+/// It requires a deliberate long press, so brushing past it does nothing.
 private final class VirtualMouseLockButton: UIButton {
     let input: RemoteMouseInput
 
     init(input: RemoteMouseInput) {
         self.input = input
         super.init(frame: .zero)
-        addTarget(self, action: #selector(toggle), for: .touchUpInside)
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
+        press.minimumPressDuration = 0.45
+        addGestureRecognizer(press)
         accessibilityLabel = NSLocalizedString("拖拽锁定", comment: "")
-        accessibilityHint = NSLocalizedString("锁定后单指滑动即为按住左键拖动", comment: "")
+        accessibilityHint = NSLocalizedString("长按切换；锁定后单指滑动即为按住左键拖动", comment: "")
         refresh()
     }
 
@@ -280,8 +283,18 @@ private final class VirtualMouseLockButton: UIButton {
         layer.cornerRadius = bounds.height / 2
     }
 
-    @objc private func toggle() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    @objc private func longPressed(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began else { return }
+        toggle()
+    }
+
+    override func accessibilityActivate() -> Bool {
+        toggle()
+        return true
+    }
+
+    private func toggle() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         input.toggleLeftLock()
     }
 
@@ -344,7 +357,7 @@ private final class VirtualMousePad: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let side = min(20, bounds.height * 0.3)
-        let centerY = style == .mouseBody ? bounds.height * 0.34 : bounds.midY
+        let centerY = bounds.midY
         icon.frame = CGRect(x: bounds.midX - side / 2, y: centerY - side / 2,
                             width: side, height: side)
     }
@@ -408,18 +421,27 @@ private final class VirtualMousePad: UIView {
 
 // MARK: - Cursor-following mouse
 
-/// A mouse-shaped control attached to the remote cursor. Dragging the body
-/// moves the cursor 1:1, so the buttons always stay under the finger and the
-/// finger never covers the cursor.
+/// A mouse-shaped control fused with the pointer: the shell's top-left corner
+/// extends into a pointed tail whose tip is the remote cursor's hotspot.
+/// Dragging the body moves the cursor 1:1, so the buttons always stay under
+/// the finger and the finger never covers the cursor. Holding a button while
+/// sliding drags, so no separate drag lock is needed.
 final class FollowMouseView: UIView {
-    static let baseSize = CGSize(width: 108, height: 124)
+    static let baseSize = CGSize(width: 104, height: 120)
+    /// Default distance from the hotspot to the body's top-left corner, at 1x.
+    static let tipOffset: CGFloat = 12
 
     let input: RemoteMouseInput
+    /// The cursor hotspot in this view's coordinates; normally up-left of the body.
+    var tip = CGPoint(x: -FollowMouseView.tipOffset, y: -FollowMouseView.tipOffset) {
+        didSet { if tip != oldValue { updateShell() } }
+    }
     private let leftKey: VirtualMouseKey
     private let wheelKey: VirtualMouseKey
     private let rightKey: VirtualMouseKey
     private let body: VirtualMousePad
-    private let lockButton: VirtualMouseLockButton
+    private let shell = CAShapeLayer()
+    private let tipMarker = CAShapeLayer()
 
     init(input: RemoteMouseInput) {
         self.input = input
@@ -427,27 +449,42 @@ final class FollowMouseView: UIView {
         wheelKey = VirtualMouseKey(kind: .wheel, input: input, exactDrag: true)
         rightKey = VirtualMouseKey(kind: .right, input: input, exactDrag: true)
         body = VirtualMousePad(input: input, exact: true, style: .mouseBody)
-        lockButton = VirtualMouseLockButton(input: input)
         super.init(frame: CGRect(origin: .zero, size: Self.baseSize))
         isMultipleTouchEnabled = true
-        backgroundColor = UIColor(white: 0.09, alpha: 0.9)
-        layer.cornerRadius = 30
-        layer.cornerCurve = .continuous
-        layer.borderWidth = 1
-        layer.borderColor = UIColor(white: 1, alpha: 0.22).cgColor
-        layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.35
-        layer.shadowRadius = 8
-        layer.shadowOffset = CGSize(width: 0, height: 3)
-        let parts: [UIView] = [body, leftKey, wheelKey, rightKey, lockButton]
+        backgroundColor = .clear
+        // The tail is drawn outside the bounds; never clip it.
+        clipsToBounds = false
+        shell.fillColor = UIColor(white: 0.09, alpha: 0.9).cgColor
+        shell.strokeColor = UIColor(white: 1, alpha: 0.24).cgColor
+        shell.lineWidth = 1
+        shell.lineJoin = .round
+        shell.shadowColor = UIColor.black.cgColor
+        shell.shadowOpacity = 0.35
+        shell.shadowRadius = 8
+        shell.shadowOffset = CGSize(width: 0, height: 3)
+        layer.insertSublayer(shell, at: 0)
+        let parts: [UIView] = [body, leftKey, wheelKey, rightKey]
         parts.forEach(addSubview)
+        // A crisp white arrowhead marks the exact click point, like a cursor tip.
+        tipMarker.fillColor = UIColor.white.cgColor
+        tipMarker.strokeColor = UIColor.black.withAlphaComponent(0.85).cgColor
+        tipMarker.lineWidth = 1
+        tipMarker.lineJoin = .round
+        layer.addSublayer(tipMarker)
         body.onTap = { [weak input] in input?.click(left: true) }
         body.onSecondaryTap = { [weak input] in input?.click(left: false) }
         input.didCancel = { [weak self] in self?.cancelTracking() }
-        input.lockChanged = { [weak self] in self?.lockButton.refresh() }
+        input.lockChanged = nil
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private var cornerRadius: CGFloat { min(26, bounds.width * 0.26, bounds.height / 2) }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        // Touches on the tail or outside the rounded body reach the remote screen.
+        UIBezierPath(roundedRect: bounds, cornerRadius: cornerRadius).contains(point)
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -463,17 +500,49 @@ final class FollowMouseView: UIView {
         rightKey.frame = CGRect(x: inset + keyWidth + wheelWidth, y: inset,
                                 width: keyWidth, height: topHeight - inset)
         body.frame = CGRect(x: 0, y: topHeight, width: width, height: height - topHeight)
-        let lockSide = min(30, (height - topHeight) * 0.46)
-        lockButton.frame = CGRect(x: (width - lockSide) / 2,
-                                  y: height - lockSide - inset - 2,
-                                  width: lockSide, height: lockSide)
-        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
+        updateShell()
+    }
+
+    /// One closed outline: the rounded body with its top-left corner replaced by
+    /// a tail that runs to the hotspot.
+    private func updateShell() {
+        let width = bounds.width
+        let height = bounds.height
+        guard width > 0, height > 0 else { return }
+        let r = cornerRadius
+        let path = UIBezierPath()
+        path.move(to: tip)
+        path.addLine(to: CGPoint(x: r, y: 0))
+        path.addLine(to: CGPoint(x: width - r, y: 0))
+        path.addArc(withCenter: CGPoint(x: width - r, y: r), radius: r,
+                    startAngle: -.pi / 2, endAngle: 0, clockwise: true)
+        path.addLine(to: CGPoint(x: width, y: height - r))
+        path.addArc(withCenter: CGPoint(x: width - r, y: height - r), radius: r,
+                    startAngle: 0, endAngle: .pi / 2, clockwise: true)
+        path.addLine(to: CGPoint(x: r, y: height))
+        path.addArc(withCenter: CGPoint(x: r, y: height - r), radius: r,
+                    startAngle: .pi / 2, endAngle: .pi, clockwise: true)
+        path.addLine(to: CGPoint(x: 0, y: r))
+        path.close()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shell.frame = bounds
+        shell.path = path.cgPath
+        shell.shadowPath = path.cgPath
+        let marker = UIBezierPath()
+        let size = max(8, Self.tipOffset * 0.85 * width / Self.baseSize.width)
+        marker.move(to: tip)
+        marker.addLine(to: CGPoint(x: tip.x + size, y: tip.y + size * 0.42))
+        marker.addLine(to: CGPoint(x: tip.x + size * 0.42, y: tip.y + size))
+        marker.close()
+        tipMarker.frame = bounds
+        tipMarker.path = marker.cgPath
+        CATransaction.commit()
     }
 
     func cancelTracking() {
         [leftKey, wheelKey, rightKey].forEach { $0.cancelTracking() }
         body.cancelTracking()
-        lockButton.refresh()
     }
 }
 

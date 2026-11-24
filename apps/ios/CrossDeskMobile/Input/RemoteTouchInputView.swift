@@ -286,8 +286,6 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
 
     private var followMouse: FollowMouseView?
     private var followMouseScale: CGFloat = 1
-    private var followMouseFlipX = false
-    private var followMouseFlipY = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -480,28 +478,20 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         let (nx, ny) = relativeCursorPoint
         let cursor = CGPoint(x: rect.minX + CGFloat(nx) * rect.width,
                              y: rect.minY + CGFloat(ny) * rect.height)
-        let horizontalGap: CGFloat = 6
-        let verticalGap: CGFloat = 16
+        // The mouse and pointer are one shape: its tail tip is the hotspot and
+        // the body hangs down-right of it, like a real mouse. It never flips.
+        let offset = FollowMouseView.tipOffset * followMouseScale
         let margin: CGFloat = 4
-        let visibleHeight = keyboardGeometry?.visibleHeight(in: self) ?? bounds.height
-        // Flip only when the current side overflows, so the mouse does not
-        // oscillate around a threshold while the finger is dragging it.
-        if !followMouseFlipX, cursor.x + horizontalGap + size.width > bounds.width - margin {
-            followMouseFlipX = true
-        } else if followMouseFlipX, cursor.x - horizontalGap - size.width < margin {
-            followMouseFlipX = false
-        }
-        if !followMouseFlipY, cursor.y + verticalGap + size.height > visibleHeight - margin {
-            followMouseFlipY = true
-        } else if followMouseFlipY, cursor.y - verticalGap - size.height < margin {
-            followMouseFlipY = false
-        }
-        var x = followMouseFlipX ? cursor.x - horizontalGap - size.width : cursor.x + horizontalGap
-        var y = followMouseFlipY ? cursor.y - verticalGap - size.height : cursor.y + verticalGap
-        x = min(max(x, margin), max(margin, bounds.width - size.width - margin))
-        y = min(max(y, margin), max(margin, bounds.height - size.height - margin))
+        // Near the right edge the body stops once only its left half remains,
+        // keeping the left button reachable; the tail then slants to keep
+        // pointing at the cursor. Vertically the body always stays below the
+        // tip and may slide under the bottom edge.
+        let maxX = max(margin, bounds.width - size.width * 0.5)
+        let x = min(cursor.x + offset, maxX)
+        let y = cursor.y + offset
         let frame = CGRect(origin: CGPoint(x: x, y: y), size: size)
         if mouse.frame != frame { mouse.frame = frame }
+        mouse.tip = CGPoint(x: cursor.x - x, y: cursor.y - y)
     }
 
     // MARK: - Gesture arbitration

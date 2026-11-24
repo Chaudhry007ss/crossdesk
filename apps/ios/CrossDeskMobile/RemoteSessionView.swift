@@ -95,7 +95,8 @@ struct RemoteSessionView: View {
                             )
 
                             if let cursorPosition,
-                               session.pixelBuffer != nil {
+                               session.pixelBuffer != nil,
+                               !followMouseActive {
                                 RemoteCursorOverlay(
                                     normalizedPosition: cursorPosition,
                                     normalizedVisualOffset:
@@ -154,9 +155,7 @@ struct RemoteSessionView: View {
                             session.bridge.sendScrollX(x, y: y,
                                                        deltaX: dx, deltaY: dy)
                         },
-                        followMouseVisible: virtualMouseVisible &&
-                            session.pixelBuffer != nil &&
-                            inputPreferences.virtualMouseStyle == .cursorFollow,
+                        followMouseVisible: followMouseActive,
                         followMouseScale: CGFloat(inputPreferences.virtualMouseScale),
                         followMouseOpacity: CGFloat(inputPreferences.virtualMouseOpacity),
                         toggleKeyboard: {
@@ -683,6 +682,12 @@ struct RemoteSessionView: View {
             y: min(max(point.y, verticalMargin),
                    max(verticalMargin, size.height - verticalMargin))
         )
+    }
+
+    /// The fused mouse draws its own pointer tip, replacing the cursor glyph.
+    private var followMouseActive: Bool {
+        virtualMouseVisible && session.pixelBuffer != nil &&
+            inputPreferences.virtualMouseStyle == .cursorFollow
     }
 
     private var visibleCursorShape: Int {
