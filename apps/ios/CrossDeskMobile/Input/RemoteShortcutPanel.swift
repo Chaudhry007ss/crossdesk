@@ -7,7 +7,7 @@ struct RemoteShortcutPanel: View {
     let dismiss: () -> Void
     let manage: () -> Void
     @State private var category = "common"
-    @State private var page = 0
+    @State private var order: [String] = []
     private let groups = ["common", "keys", "system", "mine"]
     private let labels = ["常用", "按键", "系统", "我的"]
     private var platform: String { session.remotePlatform.rawValue }
@@ -37,46 +37,40 @@ struct RemoteShortcutPanel: View {
                         Text("KDE Plasma").tag("kde")
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
-                GeometryReader { geometry in
-                  ScrollView {
+                ScrollView {
                     if items.isEmpty {
                         Text(NSLocalizedString(!RemoteShortcut.platforms.contains(platform) ? "等待远端平台信息" : category == "system" ? "选择桌面方案以加载系统预设" : "还没有自定义快捷键", comment: ""))
                             .font(.footnote).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 16)
                     } else {
-                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
-                            ForEach(Array(items.dropFirst(page * 6).prefix(6))) { item in
+                        // Scroll instead of paging; frequently used shortcuts come first.
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], spacing: 6) {
+                            ForEach(orderedItems) { item in
                                 Button {
                                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                    RemoteShortcutUsage.record(item.id)
                                     session.sendShortcut(item)
                                 } label: {
                                     VStack(spacing: 3) {
-                                        Text(item.title).font(.subheadline)
-                                        Text(item.chord).font(.caption2).foregroundStyle(.secondary)
+                                        Text(item.title).font(.subheadline).lineLimit(1).minimumScaleFactor(0.7)
+                                        Text(item.chord).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
                                     }
                                     .multilineTextAlignment(.center)
-                                    .frame(maxWidth: .infinity, minHeight: max(44, (geometry.size.height - (session.keyboardInputStatus.isEmpty ? 6 : 34)) / 2))
+                                    .padding(.horizontal, 4)
+                                    .frame(maxWidth: .infinity, minHeight: 52)
                                     .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 7))
                                 }.disabled(!session.isConnected)
                                 .accessibilityLabel(item.title + ", " + item.chord)
                             }
                         }
+                        .padding(.vertical, 2)
                     }
                     if !session.keyboardInputStatus.isEmpty {
                         Text(session.keyboardInputStatus).font(.caption).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                }
                 HStack(spacing: 6) {
-                    if items.count > 6 {
-                        Button { page = max(0, page - 1) } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
-                            .disabled(page == 0).accessibilityLabel(NSLocalizedString("上一页", comment: ""))
-                        Text("\(page + 1) / \((items.count + 5) / 6)").font(.caption)
-                        Button { page += 1 } label: { Image(systemName: "chevron.right").frame(width: 44, height: 44) }
-                            .disabled((page + 1) * 6 >= items.count).accessibilityLabel(NSLocalizedString("下一页", comment: ""))
-                    } else {
-                        Text(RemoteShortcut.platformName(platform)).font(.caption).foregroundStyle(.secondary)
-                    }
+                    Text(RemoteShortcut.platformName(platform)).font(.caption).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     Button(NSLocalizedString("管理与自定义", comment: ""), action: manage)
                         .font(.subheadline).frame(minHeight: 44)
@@ -88,9 +82,45 @@ struct RemoteShortcutPanel: View {
         }
         .buttonStyle(.plain)
         .background(Color(uiColor: RemoteKeyboardInputBar.keyboardBackground))
-        .onValueChange(of: category) { _ in page = 0 }
-        .onValueChange(of: platform) { _ in page = 0 }
-        .onValueChange(of: store.revision) { _ in page = min(page, max(0, (items.count - 1) / 6)) }
+        .onAppear(perform: refreshOrder)
+        .onValueChange(of: category) { _ in refreshOrder() }
+        .onValueChange(of: platform) { _ in refreshOrder() }
+        .onValueChange(of: store.revision) { _ in refreshOrder() }
+    }
+
+    /// Ordering is captured when the panel opens or the category changes, so
+    /// buttons never move under the finger while the user is tapping them.
+    private var orderedItems: [RemoteShortcut] {
+        let rank = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
+        return items.enumerated().sorted { lhs, rhs in
+            let left = rank[lhs.element.id] ?? Int.max
+            let right = rank[rhs.element.id] ?? Int.max
+            return left != right ? left < right : lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private func refreshOrder() {
+        let counts = RemoteShortcutUsage.counts()
+        order = items.enumerated().sorted { lhs, rhs in
+            let left = counts[lhs.element.id] ?? 0
+            let right = counts[rhs.element.id] ?? 0
+            return left != right ? left > right : lhs.offset < rhs.offset
+        }.map(\.element.id)
+    }
+}
+
+/// Local tap counts used to put frequent shortcuts first. Never sent anywhere.
+enum RemoteShortcutUsage {
+    private static let key = "crossdesk.mobile.shortcut-usage"
+
+    static func counts() -> [String: Int] {
+        UserDefaults.standard.dictionary(forKey: key) as? [String: Int] ?? [:]
+    }
+
+    static func record(_ id: String) {
+        var values = counts()
+        values[id, default: 0] += 1
+        UserDefaults.standard.set(values, forKey: key)
     }
 }
 

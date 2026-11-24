@@ -1026,14 +1026,7 @@ private struct ServerSettingsView: View {
 
     var body: some View {
         Form {
-            Section(NSLocalizedString("鼠标控制", comment: "")) {
-                Picker(NSLocalizedString("控制模式", comment: ""), selection: $session.mouseControlMode) {
-                    ForEach(MouseControlMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
+            InputSettingsSection(session: session)
             Section(NSLocalizedString("画面偏好", comment: "")) {
                 Picker(NSLocalizedString("偏好模式", comment: ""), selection: $session.videoAdaptationPolicy) {
                     ForEach(VideoAdaptationPolicy.allCases) { policy in

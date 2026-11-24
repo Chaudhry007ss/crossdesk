@@ -80,22 +80,27 @@ private final class VirtualMouseKey: UIView {
     enum Kind { case left, wheel, right }
     private let kind: Kind
     private let input: RemoteMouseInput
+    /// Moves the cursor 1:1 with the finger, for controls attached to the cursor.
+    private let exactDrag: Bool
     private let face = UIView()
     private let faceMask = CAShapeLayer()
     private let wheelIcon = VirtualMouseWheelView()
     private var trackedTouch: UITouch?
     private var lastPoint = CGPoint.zero
     private var remainder: CGFloat = 0
+    private var travel: CGFloat = 0
+    private var startTime: TimeInterval = 0
 
-    init(kind: Kind, input: RemoteMouseInput) {
+    init(kind: Kind, input: RemoteMouseInput, exactDrag: Bool = false) {
         self.kind = kind
         self.input = input
+        self.exactDrag = exactDrag
         super.init(frame: .zero)
         isMultipleTouchEnabled = false
         isAccessibilityElement = true
         accessibilityTraits = kind == .wheel ? [.adjustable] : [.button]
         accessibilityLabel = kind == .left ? NSLocalizedString("鼠标左键", comment: "") : kind == .right ? NSLocalizedString("鼠标右键", comment: "") : NSLocalizedString("鼠标滚轮", comment: "")
-        accessibilityHint = kind == .wheel ? NSLocalizedString("上下滑动，可滑出按键范围", comment: "") : NSLocalizedString("按住并拖动，可滑出按键范围，松开结束拖拽", comment: "")
+        accessibilityHint = kind == .wheel ? NSLocalizedString("上下滑动滚动，轻点为中键", comment: "") : NSLocalizedString("按住并拖动，可滑出按键范围，松开结束拖拽", comment: "")
         face.isUserInteractionEnabled = false
         face.layer.mask = faceMask
         addSubview(face)
@@ -143,9 +148,17 @@ private final class VirtualMouseKey: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard trackedTouch == nil, let touch = touches.first else { return }
+        if kind == .left, input.leftLocked {
+            // Pressing the left button ends a locked drag.
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            input.toggleLeftLock()
+            return
+        }
         trackedTouch = touch
         lastPoint = touch.location(in: window)
         remainder = 0
+        travel = 0
+        startTime = touch.timestamp
         highlight(true)
         if kind != .wheel { input.setVirtualButton(left: kind == .left, down: true) }
     }
@@ -155,8 +168,9 @@ private final class VirtualMouseKey: UIView {
         let point = touch.location(in: window)
         let delta = CGPoint(x: point.x - lastPoint.x, y: point.y - lastPoint.y)
         lastPoint = point
+        travel += hypot(delta.x, delta.y)
         if kind != .wheel {
-            input.drag(dx: Float(delta.x), dy: Float(delta.y))
+            input.drag(dx: Float(delta.x), dy: Float(delta.y), exact: exactDrag)
             return
         }
         wheelIcon.advance(by: delta.y)
@@ -172,7 +186,13 @@ private final class VirtualMouseKey: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = trackedTouch, touches.contains(touch) else { return }
+        // A short tap on the wheel is a middle click, like pressing a real wheel.
+        let middleClick = kind == .wheel && travel < 4 && touch.timestamp - startTime < 0.3
         cancelTracking()
+        if middleClick {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            input.clickMiddle()
+        }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { cancelTracking() }
@@ -235,5 +255,334 @@ private final class VirtualMouseWheelView: UIView {
             let y = CGFloat(index) * pitch + phase
             context.fill(CGRect(x: 0, y: y, width: bounds.width, height: 1.5))
         }
+    }
+}
+
+// MARK: - Shared virtual mouse parts
+
+/// Toggles a held left button so a single finger can drag files or select text.
+private final class VirtualMouseLockButton: UIButton {
+    let input: RemoteMouseInput
+
+    init(input: RemoteMouseInput) {
+        self.input = input
+        super.init(frame: .zero)
+        addTarget(self, action: #selector(toggle), for: .touchUpInside)
+        accessibilityLabel = NSLocalizedString("拖拽锁定", comment: "")
+        accessibilityHint = NSLocalizedString("锁定后单指滑动即为按住左键拖动", comment: "")
+        refresh()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layer.cornerRadius = bounds.height / 2
+    }
+
+    @objc private func toggle() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        input.toggleLeftLock()
+    }
+
+    func refresh() {
+        let locked = input.leftLocked
+        let configuration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        setImage(UIImage(systemName: locked ? "lock.fill" : "lock.open",
+                         withConfiguration: configuration), for: .normal)
+        tintColor = locked ? .white : UIColor(white: 1, alpha: 0.78)
+        backgroundColor = locked
+            ? UIColor(red: 46 / 255, green: 122 / 255, blue: 219 / 255, alpha: 1)
+            : UIColor(white: 1, alpha: 0.14)
+        accessibilityValue = locked ? NSLocalizedString("已锁定", comment: "")
+            : NSLocalizedString("未锁定", comment: "")
+    }
+}
+
+/// A touch area that moves the cursor without pressing a button. A short tap
+/// clicks; a short two-finger tap right-clicks.
+private final class VirtualMousePad: UIView {
+    enum Style { case mouseBody, trackpad }
+
+    let input: RemoteMouseInput
+    private let exact: Bool
+    private let style: Style
+    var onTap: (() -> Void)?
+    var onSecondaryTap: (() -> Void)?
+    private let icon = UIImageView()
+    private var trackedTouch: UITouch?
+    private var lastPoint = CGPoint.zero
+    private var startTime: TimeInterval = 0
+    private var travel: CGFloat = 0
+    private var maximumTouches = 0
+
+    init(input: RemoteMouseInput, exact: Bool, style: Style) {
+        self.input = input
+        self.exact = exact
+        self.style = style
+        super.init(frame: .zero)
+        isMultipleTouchEnabled = true
+        backgroundColor = style == .trackpad ? UIColor(white: 1, alpha: 0.08) : .clear
+        layer.cornerRadius = style == .trackpad ? 12 : 0
+        layer.cornerCurve = .continuous
+        icon.image = UIImage(systemName: style == .mouseBody
+                             ? "arrow.up.and.down.and.arrow.left.and.right"
+                             : "hand.point.up.left")
+        icon.tintColor = UIColor(white: 1, alpha: 0.5)
+        icon.contentMode = .scaleAspectFit
+        icon.isUserInteractionEnabled = false
+        addSubview(icon)
+        isAccessibilityElement = true
+        accessibilityTraits = [.allowsDirectInteraction]
+        accessibilityLabel = style == .mouseBody ? NSLocalizedString("拖动移动光标", comment: "")
+            : NSLocalizedString("触控板", comment: "")
+        accessibilityHint = NSLocalizedString("滑动移动光标，轻点为左键，双指轻点为右键", comment: "")
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let side = min(20, bounds.height * 0.3)
+        let centerY = style == .mouseBody ? bounds.height * 0.34 : bounds.midY
+        icon.frame = CGRect(x: bounds.midX - side / 2, y: centerY - side / 2,
+                            width: side, height: side)
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        maximumTouches = max(maximumTouches, event?.touches(for: self)?.count ?? touches.count)
+        guard trackedTouch == nil, let touch = touches.first else { return }
+        trackedTouch = touch
+        lastPoint = touch.location(in: window)
+        startTime = touch.timestamp
+        travel = 0
+        input.beginNudge()
+        highlight(true)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = trackedTouch, touches.contains(touch) else { return }
+        let point = touch.location(in: window)
+        let delta = CGPoint(x: point.x - lastPoint.x, y: point.y - lastPoint.y)
+        lastPoint = point
+        travel += hypot(delta.x, delta.y)
+        if input.hasVirtualButton {
+            // A held or locked button turns body movement into a drag.
+            input.drag(dx: Float(delta.x), dy: Float(delta.y), exact: exact)
+        } else {
+            input.nudge(dx: Float(delta.x), dy: Float(delta.y), exact: exact)
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = trackedTouch, touches.contains(touch) else { return }
+        let tapped = travel < 8 && touch.timestamp - startTime < 0.3
+        let fingers = maximumTouches
+        cancelTracking()
+        guard tapped, !input.hasVirtualButton else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if fingers >= 2 { onSecondaryTap?() } else { onTap?() }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        cancelTracking()
+    }
+
+    func cancelTracking() {
+        if trackedTouch != nil { input.endNudge() }
+        trackedTouch = nil
+        maximumTouches = 0
+        highlight(false)
+    }
+
+    private func highlight(_ active: Bool) {
+        switch style {
+        case .mouseBody:
+            backgroundColor = active ? UIColor(white: 1, alpha: 0.08) : .clear
+        case .trackpad:
+            backgroundColor = UIColor(white: 1, alpha: active ? 0.16 : 0.08)
+        }
+        icon.tintColor = UIColor(white: 1, alpha: active ? 0.8 : 0.5)
+    }
+}
+
+// MARK: - Cursor-following mouse
+
+/// A mouse-shaped control attached to the remote cursor. Dragging the body
+/// moves the cursor 1:1, so the buttons always stay under the finger and the
+/// finger never covers the cursor.
+final class FollowMouseView: UIView {
+    static let baseSize = CGSize(width: 108, height: 124)
+
+    let input: RemoteMouseInput
+    private let leftKey: VirtualMouseKey
+    private let wheelKey: VirtualMouseKey
+    private let rightKey: VirtualMouseKey
+    private let body: VirtualMousePad
+    private let lockButton: VirtualMouseLockButton
+
+    init(input: RemoteMouseInput) {
+        self.input = input
+        leftKey = VirtualMouseKey(kind: .left, input: input, exactDrag: true)
+        wheelKey = VirtualMouseKey(kind: .wheel, input: input, exactDrag: true)
+        rightKey = VirtualMouseKey(kind: .right, input: input, exactDrag: true)
+        body = VirtualMousePad(input: input, exact: true, style: .mouseBody)
+        lockButton = VirtualMouseLockButton(input: input)
+        super.init(frame: CGRect(origin: .zero, size: Self.baseSize))
+        isMultipleTouchEnabled = true
+        backgroundColor = UIColor(white: 0.09, alpha: 0.9)
+        layer.cornerRadius = 30
+        layer.cornerCurve = .continuous
+        layer.borderWidth = 1
+        layer.borderColor = UIColor(white: 1, alpha: 0.22).cgColor
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.35
+        layer.shadowRadius = 8
+        layer.shadowOffset = CGSize(width: 0, height: 3)
+        let parts: [UIView] = [body, leftKey, wheelKey, rightKey, lockButton]
+        parts.forEach(addSubview)
+        body.onTap = { [weak input] in input?.click(left: true) }
+        body.onSecondaryTap = { [weak input] in input?.click(left: false) }
+        input.didCancel = { [weak self] in self?.cancelTracking() }
+        input.lockChanged = { [weak self] in self?.lockButton.refresh() }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let width = bounds.width
+        let height = bounds.height
+        let inset = max(4, width * 0.045)
+        let topHeight = height * 0.46
+        let wheelWidth = max(22, width * 0.22)
+        let keyWidth = max(0, (width - wheelWidth - 2 * inset) / 2)
+        leftKey.frame = CGRect(x: inset, y: inset, width: keyWidth, height: topHeight - inset)
+        wheelKey.frame = CGRect(x: inset + keyWidth, y: inset,
+                                width: wheelWidth, height: topHeight - inset)
+        rightKey.frame = CGRect(x: inset + keyWidth + wheelWidth, y: inset,
+                                width: keyWidth, height: topHeight - inset)
+        body.frame = CGRect(x: 0, y: topHeight, width: width, height: height - topHeight)
+        let lockSide = min(30, (height - topHeight) * 0.46)
+        lockButton.frame = CGRect(x: (width - lockSide) / 2,
+                                  y: height - lockSide - inset - 2,
+                                  width: lockSide, height: lockSide)
+        layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: layer.cornerRadius).cgPath
+    }
+
+    func cancelTracking() {
+        [leftKey, wheelKey, rightKey].forEach { $0.cancelTracking() }
+        body.cancelTracking()
+        lockButton.refresh()
+    }
+}
+
+// MARK: - Floating trackpad
+
+struct VirtualTrackpadPanel: View {
+    static let baseSize = CGSize(width: 212, height: 160)
+
+    static func size(scale: CGFloat) -> CGSize {
+        CGSize(width: baseSize.width * scale, height: baseSize.height * scale)
+    }
+
+    let input: RemoteMouseInput
+    let scale: CGFloat
+    let center: CGPoint
+    let constrain: (CGPoint) -> CGPoint
+    let moved: (CGPoint) -> Void
+    @GestureState private var translation = CGSize.zero
+
+    private func translated(by offset: CGSize) -> CGPoint {
+        constrain(CGPoint(x: center.x + offset.width, y: center.y + offset.height))
+    }
+
+    var body: some View {
+        let size = Self.size(scale: scale)
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(Color.white.opacity(0.55))
+                .frame(width: 32, height: 4)
+                .frame(maxWidth: .infinity)
+                .frame(height: 22)
+                .contentShape(Rectangle())
+                .accessibilityLabel(NSLocalizedString("拖动虚拟鼠标", comment: ""))
+                .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .updating($translation) { value, state, _ in state = value.translation }
+                    .onEnded { value in moved(translated(by: value.translation)) })
+            VirtualTrackpadKeys(input: input)
+                .padding(.horizontal, 6)
+                .padding(.bottom, 6)
+        }
+        .frame(width: size.width, height: size.height)
+        .background(Color.black.opacity(0.78),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.2), lineWidth: 0.5)
+            .allowsHitTesting(false))
+        .position(translated(by: translation))
+    }
+}
+
+private struct VirtualTrackpadKeys: UIViewRepresentable {
+    let input: RemoteMouseInput
+
+    func makeUIView(context: Context) -> VirtualTrackpadView {
+        VirtualTrackpadView(input: input)
+    }
+
+    func updateUIView(_ view: VirtualTrackpadView, context: Context) {}
+
+    static func dismantleUIView(_ view: VirtualTrackpadView, coordinator: ()) {
+        view.input.releaseAll()
+    }
+}
+
+final class VirtualTrackpadView: UIView {
+    let input: RemoteMouseInput
+    private let pad: VirtualMousePad
+    private let keys: [VirtualMouseKey]
+    private let lockButton: VirtualMouseLockButton
+
+    init(input: RemoteMouseInput) {
+        self.input = input
+        pad = VirtualMousePad(input: input, exact: false, style: .trackpad)
+        keys = [VirtualMouseKey(kind: .left, input: input),
+                VirtualMouseKey(kind: .wheel, input: input),
+                VirtualMouseKey(kind: .right, input: input)]
+        lockButton = VirtualMouseLockButton(input: input)
+        super.init(frame: .zero)
+        isMultipleTouchEnabled = true
+        addSubview(pad)
+        keys.forEach(addSubview)
+        addSubview(lockButton)
+        pad.onTap = { [weak input] in input?.click(left: true) }
+        pad.onSecondaryTap = { [weak input] in input?.click(left: false) }
+        input.didCancel = { [weak self] in self?.cancelTracking() }
+        input.lockChanged = { [weak self] in self?.lockButton.refresh() }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let rowHeight = min(46, bounds.height * 0.36)
+        pad.frame = CGRect(x: 0, y: 0, width: bounds.width,
+                           height: max(0, bounds.height - rowHeight - 4))
+        let wheelWidth: CGFloat = 30
+        let keyWidth = max(0, (bounds.width - wheelWidth) / 2)
+        let rowY = bounds.height - rowHeight
+        keys[0].frame = CGRect(x: 0, y: rowY, width: keyWidth, height: rowHeight)
+        keys[1].frame = CGRect(x: keyWidth, y: rowY, width: wheelWidth, height: rowHeight)
+        keys[2].frame = CGRect(x: keyWidth + wheelWidth, y: rowY, width: keyWidth, height: rowHeight)
+        let lockSide: CGFloat = 28
+        lockButton.frame = CGRect(x: bounds.width - lockSide - 6, y: 6,
+                                  width: lockSide, height: lockSide)
+    }
+
+    func cancelTracking() {
+        keys.forEach { $0.cancelTracking() }
+        pad.cancelTracking()
+        lockButton.refresh()
     }
 }

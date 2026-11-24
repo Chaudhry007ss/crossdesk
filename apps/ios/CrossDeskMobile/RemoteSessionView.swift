@@ -54,6 +54,8 @@ struct RemoteSessionView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.hasVerticalSystemBar) private var hasVerticalSystemBar
     @State private var mouseInput = RemoteMouseInput()
+    @ObservedObject private var inputPreferences = InputPreferences.shared
+    @State private var gestureGuideVisible = false
     @State private var virtualMouseVisible = true
     @State private var virtualMouseCenter: CGPoint?
     @StateObject private var systemKeyboardContext = RemoteKeyboardInputContext()
@@ -151,6 +153,21 @@ struct RemoteSessionView: View {
                             cursorPosition = CGPoint(x: CGFloat(x), y: CGFloat(y))
                             session.bridge.sendScrollX(x, y: y,
                                                        deltaX: dx, deltaY: dy)
+                        },
+                        followMouseVisible: virtualMouseVisible &&
+                            session.pixelBuffer != nil &&
+                            inputPreferences.virtualMouseStyle == .cursorFollow,
+                        followMouseScale: CGFloat(inputPreferences.virtualMouseScale),
+                        followMouseOpacity: CGFloat(inputPreferences.virtualMouseOpacity),
+                        toggleKeyboard: {
+                            statusMenuVisible = false
+                            keyboardInputVisible.toggle()
+                        },
+                        switchDisplay: { step in
+                            let count = session.displays.count
+                            guard count > 1 else { return }
+                            mouseInput.releaseAll()
+                            session.selectDisplay((session.selectedDisplay + step + count) % count)
                         }
                     )
                     .frame(width: proxy.size.width, height: proxy.size.height)
@@ -213,6 +230,20 @@ struct RemoteSessionView: View {
                 disconnectConfirmationOverlay
                     .zIndex(50)
             }
+            if gestureGuideVisible {
+                RemoteGestureGuide(mode: session.mouseControlMode) {
+                    inputPreferences.gestureGuideShown = true
+                    gestureGuideVisible = false
+                }
+                .zIndex(55)
+            }
+        }
+        .onValueChange(of: session.pixelBuffer != nil) { hasFrame in
+            // Show the gesture overview once, after the first remote frame.
+            if hasFrame, !inputPreferences.gestureGuideShown {
+                mouseInput.releaseAll()
+                gestureGuideVisible = true
+            }
         }
         .statusBarHidden(hasVerticalSystemBar)
         .alert(NSLocalizedString("升级提示", comment: ""), isPresented: Binding(
@@ -240,6 +271,8 @@ struct RemoteSessionView: View {
                 case 2: session.bridge.sendPointer(x: x, y: y, action: .leftUp)
                 case 3: session.bridge.sendPointer(x: x, y: y, action: .rightDown)
                 case 4: session.bridge.sendPointer(x: x, y: y, action: .rightUp)
+                case 5: session.bridge.sendPointer(x: x, y: y, action: .middleDown)
+                case 6: session.bridge.sendPointer(x: x, y: y, action: .middleUp)
                 case 7: session.bridge.sendScrollX(x, y: y, deltaX: 0, deltaY: wheel)
                 default: break
                 }
@@ -289,7 +322,8 @@ struct RemoteSessionView: View {
             }
         }
         .onValueChange(of: session.remoteCursorPositionRevision) { _ in
-            guard !mouseInput.hasVirtualButton, let position = session.remoteCursorPosition else { return }
+            guard !mouseInput.hasVirtualButton, !mouseInput.isNudging,
+                  let position = session.remoteCursorPosition else { return }
             mouseInput.position(x: Float(position.x), y: Float(position.y))
             cursorPosition = position
         }
@@ -437,10 +471,7 @@ struct RemoteSessionView: View {
                         }
                 }
                 if virtualMouseVisible, session.pixelBuffer != nil {
-                    VirtualMouseBar(input: mouseInput,
-                                    center: boundedMouseCenter(virtualMouseCenter, in: containerSize),
-                                    constrain: { boundedMouseCenter($0, in: containerSize) },
-                                    moved: { self.virtualMouseCenter = $0 })
+                    floatingVirtualMouse(in: containerSize)
                 }
 
                 FloatingMenuLayout(orbCenter: orbCenter, panelWidth: panelWidth) {
@@ -463,6 +494,11 @@ struct RemoteSessionView: View {
                                 statusMenuVisible = false
                                 keyboardInputVisible = false
                                 showingFileImporter = true
+                            },
+                            showGestureGuide: {
+                                statusMenuVisible = false
+                                keyboardInputVisible = false
+                                gestureGuideVisible = true
                             },
                             close: {
                                 withAnimation(.easeOut(duration: 0.14)) {
@@ -521,9 +557,34 @@ struct RemoteSessionView: View {
         }
     }
 
-    private func boundedMouseCenter(_ preferred: CGPoint?, in size: CGSize) -> CGPoint {
-        let halfWidth = VirtualMouseBar.size.width / 2
-        let halfHeight = VirtualMouseBar.size.height / 2
+    /// The cursor-following style lives in the touch surface; the floating
+    /// styles are placed here, above the video and away from the keyboard.
+    @ViewBuilder
+    private func floatingVirtualMouse(in containerSize: CGSize) -> some View {
+        switch inputPreferences.virtualMouseStyle {
+        case .cursorFollow:
+            EmptyView()
+        case .trackpad:
+            let size = VirtualTrackpadPanel.size(scale: CGFloat(inputPreferences.virtualMouseScale))
+            VirtualTrackpadPanel(input: mouseInput,
+                                 scale: CGFloat(inputPreferences.virtualMouseScale),
+                                 center: boundedMouseCenter(virtualMouseCenter, in: containerSize, size: size),
+                                 constrain: { boundedMouseCenter($0, in: containerSize, size: size) },
+                                 moved: { self.virtualMouseCenter = $0 })
+                .opacity(inputPreferences.virtualMouseOpacity)
+        case .classic:
+            VirtualMouseBar(input: mouseInput,
+                            center: boundedMouseCenter(virtualMouseCenter, in: containerSize),
+                            constrain: { boundedMouseCenter($0, in: containerSize) },
+                            moved: { self.virtualMouseCenter = $0 })
+                .opacity(inputPreferences.virtualMouseOpacity)
+        }
+    }
+
+    private func boundedMouseCenter(_ preferred: CGPoint?, in size: CGSize,
+                                    size panelSize: CGSize = VirtualMouseBar.size) -> CGPoint {
+        let halfWidth = panelSize.width / 2
+        let halfHeight = panelSize.height / 2
         let point = preferred ?? CGPoint(x: size.width - halfWidth - 16,
                                          y: size.height - halfHeight - 24)
         let x = min(max(point.x, halfWidth + 8), max(halfWidth + 8, size.width - halfWidth - 8))
@@ -533,7 +594,7 @@ struct RemoteSessionView: View {
             let keyboardSize = keyboardPanelSize(in: size)
             let center = keyboardCenter(in: size, panelSize: keyboardSize)
             let keyboardRect = CGRect(x: center.x - keyboardSize.width / 2, y: center.y - keyboardSize.height / 2, width: keyboardSize.width, height: keyboardSize.height)
-            if keyboardRect.intersects(CGRect(origin: CGPoint(x: x - halfWidth, y: y - halfHeight), size: VirtualMouseBar.size)) {
+            if keyboardRect.intersects(CGRect(origin: CGPoint(x: x - halfWidth, y: y - halfHeight), size: panelSize)) {
                 y = keyboardRect.minY - 6 - halfHeight
                 if y - halfHeight < 8 { y = keyboardRect.maxY + 6 + halfHeight }
             }
@@ -649,6 +710,8 @@ private struct RemoteKeyboardKeyCap: View {
     let symbol: String?
     let style: RemoteKeyboardKeyStyle
     let active: Bool
+    /// A double-tapped modifier that stays held on the remote computer.
+    var locked = false
     let action: () -> Void
 
     var body: some View {
@@ -685,10 +748,19 @@ private struct RemoteKeyboardKeyCap: View {
             }
             .foregroundStyle(active ? Color.black : RemoteKeyboardPalette.keyText)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .bottom) {
+                if locked {
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(width: 14, height: 3)
+                        .padding(.bottom, 4)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(RemoteKeyboardPressStyle(backgroundColor: backgroundColor))
         .accessibilityAddTraits(active ? .isSelected : [])
+        .accessibilityValue(locked ? NSLocalizedString("已锁定", comment: "") : "")
     }
 
     private var labelFontSize: CGFloat {
@@ -751,6 +823,8 @@ private enum RemoteComputerKeyAction {
     case modifier(UInt)
     case switchKeyboard
     case dismiss
+    /// Inverted-T arrow keys rendered inside one key slot.
+    case arrowCluster
 }
 
 private struct RemoteComputerKey {
@@ -819,6 +893,12 @@ private struct RemoteComputerKey {
         if case let .modifier(keyCode) = action { return keyCode }
         return nil
     }
+
+    /// Backspace, Delete and arrows repeat while held, like a hardware keyboard.
+    var repeats: Bool {
+        guard case let .stroke(keyCode) = action else { return false }
+        return [0x08, 0x2E, 0x25, 0x26, 0x27, 0x28].contains(keyCode)
+    }
 }
 
 private enum RemoteComputerKeyboardPage: String, CaseIterable {
@@ -882,14 +962,19 @@ private struct RemoteComputerKeyboard: View {
     let showShortcuts: () -> Void
     let dismiss: () -> Void
     @State private var activeModifiers: Set<UInt> = []
+    /// Modifiers held down on the remote computer until tapped again, so they
+    /// combine with mouse clicks (Ctrl/Shift-click) and repeated keys (Alt+Tab).
+    @State private var lockedModifiers: Set<UInt> = []
+    @State private var lastModifierTap: (code: UInt, time: Date)?
     @State private var page: RemoteComputerKeyboardPage = .input
 
     private var commonRow: [RemoteComputerKey] { [
         .init("Ctrl", 0x11, isModifier: true),
         .init(RemoteShortcut.modifierName(91, platform: session.remotePlatform.rawValue), 0x5B, isModifier: true),
         .init(RemoteShortcut.modifierName(18, platform: session.remotePlatform.rawValue), 0x12, isModifier: true),
-        .init(NSLocalizedString("空格", comment: ""), 0x20, width: 2.6),
-        .init(NSLocalizedString("回车", comment: ""), 0x0D, width: 1.4, style: .special)
+        .init(NSLocalizedString("空格", comment: ""), 0x20, width: 2.1),
+        .init(NSLocalizedString("回车", comment: ""), 0x0D, width: 1.3, style: .special),
+        .init("arrows", width: 2.1, action: .arrowCluster)
     ] }
 
     var body: some View {
@@ -943,7 +1028,9 @@ private struct RemoteComputerKeyboard: View {
                             RemoteComputerKeyboardRow(
                                 keys: row,
                                 activeModifiers: activeModifiers,
-                                action: handleKey
+                                action: handleKey,
+                                lockedModifiers: lockedModifiers,
+                                repeatAction: repeatKey
                             )
                         }
                     }
@@ -954,7 +1041,9 @@ private struct RemoteComputerKeyboard: View {
                             keys: row,
                             activeModifiers: activeModifiers,
                             action: handleKey,
-                            fixedEdgeWidth: edgeKeyWidth
+                            fixedEdgeWidth: edgeKeyWidth,
+                            lockedModifiers: lockedModifiers,
+                            repeatAction: repeatKey
                         )
                         .frame(height: sharedRowHeight)
                     }
@@ -962,7 +1051,9 @@ private struct RemoteComputerKeyboard: View {
                     RemoteComputerKeyboardRow(
                         keys: commonRow,
                         activeModifiers: activeModifiers,
-                        action: handleKey
+                        action: handleKey,
+                        lockedModifiers: lockedModifiers,
+                        repeatAction: repeatKey
                     )
                     .frame(height: sharedRowHeight)
                 }
@@ -1006,25 +1097,54 @@ private struct RemoteComputerKeyboard: View {
         feedback.keyPressed()
         switch key.action {
         case let .modifier(keyCode):
-            if activeModifiers.contains(keyCode) {
+            let now = Date()
+            if lockedModifiers.contains(keyCode) {
+                // Tapping a locked modifier releases it on the remote computer.
+                lockedModifiers.remove(keyCode)
+                session.sendKeyState(keyCode, isDown: false)
+                lastModifierTap = nil
+            } else if activeModifiers.contains(keyCode) {
                 activeModifiers.remove(keyCode)
+                if let last = lastModifierTap, last.code == keyCode,
+                   now.timeIntervalSince(last.time) < 0.4 {
+                    // Double tap: hold the key down until it is tapped again.
+                    lockedModifiers.insert(keyCode)
+                    session.sendKeyState(keyCode, isDown: true)
+                }
+                lastModifierTap = nil
             } else {
                 activeModifiers.insert(keyCode)
+                lastModifierTap = (keyCode, now)
             }
         case let .stroke(keyCode):
-            session.sendKeyChord(keyCode, modifiers: Array(activeModifiers))
+            // Locked modifiers are already down remotely; only send one-shot ones.
+            session.sendKeyChord(keyCode, modifiers: Array(activeModifiers.subtracting(lockedModifiers)))
             activeModifiers.removeAll()
+            lastModifierTap = nil
         case .switchKeyboard:
             releaseModifiers()
             switchKeyboard()
         case .dismiss:
             releaseModifiers()
             dismiss()
+        case .arrowCluster:
+            break
         }
+    }
+
+    /// Auto-repeat without per-key haptics or clearing locked modifiers.
+    private func repeatKey(_ key: RemoteComputerKey) {
+        guard case let .stroke(keyCode) = key.action else { return }
+        session.sendKeyChord(keyCode, modifiers: [])
     }
 
     private func releaseModifiers() {
         activeModifiers.removeAll()
+        lastModifierTap = nil
+        for keyCode in lockedModifiers {
+            session.sendKeyState(keyCode, isDown: false)
+        }
+        lockedModifiers.removeAll()
     }
 }
 
@@ -1033,6 +1153,8 @@ private struct RemoteComputerKeyboardRow: View {
     let activeModifiers: Set<UInt>
     let action: (RemoteComputerKey) -> Void
     var fixedEdgeWidth: CGFloat? = nil
+    var lockedModifiers: Set<UInt> = []
+    var repeatAction: ((RemoteComputerKey) -> Void)? = nil
 
     var body: some View {
         GeometryReader { proxy in
@@ -1049,24 +1171,148 @@ private struct RemoteComputerKeyboardRow: View {
                 ForEach(Array(keys.enumerated()), id: \.offset) { index, key in
                     let width = index == 0 || index == keys.count - 1
                         ? (edgeWidth ?? unitWidth * key.width) : unitWidth * key.width
-                    let isActive = key.modifierCode.map(activeModifiers.contains) ?? false
-                    let visibleSymbol = isActive && key.symbol == "shift"
-                        ? "shift.fill" : key.symbol
-                    RemoteKeyboardKeyCap(
-                        title: key.title,
-                        symbol: visibleSymbol,
-                        style: key.style,
-                        active: isActive
-                    ) {
-                        action(key)
-                    }
-                    .frame(width: width)
-                    .accessibilityLabel(key.accessibilityLabel)
+                    keyView(key)
+                        .frame(width: width)
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func keyView(_ key: RemoteComputerKey) -> some View {
+        if case .arrowCluster = key.action {
+            RemoteArrowCluster(action: action, repeatAction: repeatAction)
+        } else if key.repeats {
+            RemoteRepeatingKeyCap(key: key, action: action, repeatAction: repeatAction)
+        } else {
+            let isLocked = key.modifierCode.map(lockedModifiers.contains) ?? false
+            let isActive = isLocked || (key.modifierCode.map(activeModifiers.contains) ?? false)
+            let visibleSymbol = isActive && key.symbol == "shift"
+                ? "shift.fill" : key.symbol
+            RemoteKeyboardKeyCap(
+                title: key.title,
+                symbol: visibleSymbol,
+                style: key.style,
+                active: isActive,
+                locked: isLocked
+            ) {
+                action(key)
+            }
+            .accessibilityLabel(key.accessibilityLabel)
+        }
+    }
+}
+
+/// A key that fires on touch-down and auto-repeats after a short hold.
+private struct RemoteRepeatingKeyCap: View {
+    let key: RemoteComputerKey
+    let action: (RemoteComputerKey) -> Void
+    let repeatAction: ((RemoteComputerKey) -> Void)?
+    var compact = false
+    @State private var pressed = false
+    @State private var timer: Timer?
+
+    var body: some View {
+        GeometryReader { proxy in
+            let fontSize = min(compact ? 13 : 17, proxy.size.height * 0.55)
+            Group {
+                if let symbol = key.symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: fontSize, weight: .regular))
+                } else {
+                    Text(key.title ?? "")
+                        .font(.system(size: fontSize, weight: .regular))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
+            }
+            .foregroundStyle(RemoteKeyboardPalette.keyText)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .background {
+                RoundedRectangle(cornerRadius: compact ? 5 : RemoteKeyboardMetrics.cornerRadius,
+                                 style: .continuous)
+                    .fill(pressed ? RemoteKeyboardPalette.pressedKey : background)
+                    .shadow(color: RemoteKeyboardPalette.keyShadow, radius: 0, y: 1)
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !pressed else { return }
+                        pressed = true
+                        action(key)
+                        startRepeating()
+                    }
+                    .onEnded { _ in stopRepeating() }
+            )
+        }
+        .onDisappear(perform: stopRepeating)
+        .accessibilityElement()
+        .accessibilityLabel(key.accessibilityLabel)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { action(key) }
+    }
+
+    private var background: Color {
+        key.style == .character ? RemoteKeyboardPalette.characterKey : RemoteKeyboardPalette.specialKey
+    }
+
+    private func startRepeating() {
+        timer?.invalidate()
+        let start = Date()
+        let send = repeatAction ?? action
+        let repeating = Timer(timeInterval: 0.05, repeats: true) { _ in
+            guard Date().timeIntervalSince(start) >= 0.42 else { return }
+            send(key)
+        }
+        RunLoop.main.add(repeating, forMode: .common)
+        timer = repeating
+    }
+
+    private func stopRepeating() {
+        pressed = false
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
+/// Inverted-T arrow keys in a single key slot, as on a laptop keyboard.
+private struct RemoteArrowCluster: View {
+    let action: (RemoteComputerKey) -> Void
+    let repeatAction: ((RemoteComputerKey) -> Void)?
+
+    private static let up = RemoteComputerKey(symbol: "arrowtriangle.up.fill", 0x26, style: .special)
+    private static let left = RemoteComputerKey(symbol: "arrowtriangle.left.fill", 0x25, style: .special)
+    private static let down = RemoteComputerKey(symbol: "arrowtriangle.down.fill", 0x28, style: .special)
+    private static let right = RemoteComputerKey(symbol: "arrowtriangle.right.fill", 0x27, style: .special)
+
+    var body: some View {
+        GeometryReader { proxy in
+            let spacing: CGFloat = 3
+            let width = max(0, (proxy.size.width - 2 * spacing) / 3)
+            let height = max(0, (proxy.size.height - spacing) / 2)
+            VStack(spacing: spacing) {
+                HStack(spacing: spacing) {
+                    Color.clear.frame(width: width)
+                    cap(Self.up).frame(width: width)
+                    Color.clear.frame(width: width)
+                }
+                .frame(height: height)
+                HStack(spacing: spacing) {
+                    cap(Self.left).frame(width: width)
+                    cap(Self.down).frame(width: width)
+                    cap(Self.right).frame(width: width)
+                }
+                .frame(height: height)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+    }
+
+    private func cap(_ key: RemoteComputerKey) -> some View {
+        RemoteRepeatingKeyCap(key: key, action: action, repeatAction: repeatAction, compact: true)
     }
 }
 
@@ -1144,13 +1390,14 @@ private struct FloatingSessionMenu: View {
     let virtualMouseVisible: Bool
     let toggleMouse: () -> Void
     let releaseMouse: () -> Void
-    private enum Page { case controls, videoSettings, networkStats }
+    private enum Page { case controls, videoSettings, networkStats, inputSettings }
     @State private var page: Page = .controls
     @State private var endpointsExpanded = false
     @State private var displayedNetworkSnapshot: RemoteNetworkSnapshot
     @State private var displayedFrameSize: CGSize
     let showKeyboard: () -> Void
     let chooseFile: () -> Void
+    let showGestureGuide: () -> Void
     let close: () -> Void
     let disconnect: () -> Void
 
@@ -1166,6 +1413,7 @@ private struct FloatingSessionMenu: View {
          releaseMouse: @escaping () -> Void,
          showKeyboard: @escaping () -> Void,
          chooseFile: @escaping () -> Void,
+         showGestureGuide: @escaping () -> Void,
          close: @escaping () -> Void,
          disconnect: @escaping () -> Void) {
         self.session = session
@@ -1175,6 +1423,7 @@ private struct FloatingSessionMenu: View {
         self.releaseMouse = releaseMouse
         self.showKeyboard = showKeyboard
         self.chooseFile = chooseFile
+        self.showGestureGuide = showGestureGuide
         self.close = close
         self.disconnect = disconnect
         // Render the first frame with real values instead of replacing empty
@@ -1240,7 +1489,7 @@ private struct FloatingSessionMenu: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(NSLocalizedString("返回控制栏", comment: ""))
-                Text(page == .videoSettings ? NSLocalizedString("画面设置", comment: "") : NSLocalizedString("网络状态", comment: ""))
+                Text(pageTitle)
                     .font(.subheadline.weight(.semibold))
             } else {
                 Circle()
@@ -1268,9 +1517,57 @@ private struct FloatingSessionMenu: View {
         }
     }
 
+    private var pageTitle: String {
+        switch page {
+        case .videoSettings: return NSLocalizedString("画面设置", comment: "")
+        case .networkStats: return NSLocalizedString("网络状态", comment: "")
+        case .inputSettings: return NSLocalizedString("操作设置", comment: "")
+        case .controls: return ""
+        }
+    }
+
+    /// Frequent desktop shortcuts, reachable without opening a keyboard.
+    private var quickKeys: [(title: String, key: UInt, modifiers: [UInt])] {
+        let platform = session.remotePlatform.rawValue
+        let meta = RemoteShortcut.modifierName(91, platform: platform)
+        switch session.remotePlatform {
+        case .macos:
+            return [("Cmd+Tab", 0x09, [91]), ("Cmd+" + NSLocalizedString("空格", comment: ""), 0x20, [91]),
+                    ("Cmd+W", 0x57, [91]), ("Esc", 0x1B, [])]
+        case .linux:
+            return [(meta, 0x5B, []), ("Alt+Tab", 0x09, [18]), ("Alt+F4", 0x73, [18]), ("Esc", 0x1B, [])]
+        default:
+            return [(meta, 0x5B, []), ("Alt+Tab", 0x09, [18]), (meta + "+D", 0x44, [91]), ("Esc", 0x1B, [])]
+        }
+    }
+
+    private var quickKeyRow: some View {
+        HStack(spacing: 6) {
+            ForEach(Array(quickKeys.enumerated()), id: \.offset) { _, item in
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    session.sendKeyChord(item.key, modifiers: item.modifiers)
+                } label: {
+                    Text(item.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 30)
+                        .background(Color.primary.opacity(0.07),
+                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(!session.isConnected)
+            }
+        }
+    }
+
     @ViewBuilder private var menuContent: some View {
         if page == .videoSettings {
             FloatingVideoSettings(session: session)
+        } else if page == .inputSettings {
+            FloatingInputSettings(session: session, showGestureGuide: showGestureGuide)
         } else if page == .networkStats {
             FloatingNetworkStatistics(snapshot: displayedNetworkSnapshot,
                                       frameSize: displayedFrameSize,
@@ -1281,15 +1578,20 @@ private struct FloatingSessionMenu: View {
                     FloatingControlButton(title: NSLocalizedString("键盘", comment: ""), symbol: "keyboard",
                                           action: showKeyboard)
                     FloatingControlButton(title: virtualMouseVisible ? NSLocalizedString("收起鼠标", comment: "") : NSLocalizedString("虚拟鼠标", comment: ""),
-                                          symbol: "computermouse", action: toggleMouse)
+                                          symbol: "computermouse", selected: virtualMouseVisible,
+                                          action: toggleMouse)
                     FloatingControlButton(
-                        title: session.mouseControlMode == .relative ? NSLocalizedString("相对鼠标", comment: "") : NSLocalizedString("绝对鼠标", comment: ""),
-                        symbol: "computermouse",
+                        title: session.mouseControlMode.title,
+                        symbol: session.mouseControlMode.symbol,
                         action: {
+                            UISelectionFeedbackGenerator().selectionChanged()
                             session.mouseControlMode = session.mouseControlMode == .relative
                                 ? .absolute : .relative
                         }
                     )
+                    FloatingControlButton(title: NSLocalizedString("操作设置", comment: ""), symbol: "hand.draw") {
+                        page = .inputSettings
+                    }
 
                     Menu {
                         ForEach(Array(session.displays.enumerated()), id: \.offset) { index, name in
@@ -1345,6 +1647,8 @@ private struct FloatingSessionMenu: View {
                         .accessibilityHint(session.privacyScreen.active ? NSLocalizedString("关闭隐私屏", comment: "") : NSLocalizedString("开启隐私屏", comment: ""))
                     }
                 }
+
+                quickKeyRow
 
                 let privacyFeedback = session.privacyScreen.feedback(at: session.privacyClock)
                 if !privacyFeedback.isEmpty {

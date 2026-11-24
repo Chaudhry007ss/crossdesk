@@ -1,0 +1,132 @@
+name: Build iOS IPA (fork)
+
+# Personal-fork build: runs on a standard GitHub-hosted macOS runner and
+# produces an unsigned .ipa that Sideloadly / AltStore / SideStore can re-sign
+# with your own Apple ID. The upstream "Build iOS" workflow targets a custom
+# runner label and pinned Xcode that forks usually do not have.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "apps/ios/**"
+      - ".github/workflows/build-ios-ipa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-latest
+    timeout-minutes: 150
+    env:
+      IOS_DEPLOYMENT_TARGET: "16.0"
+      XMAKE_VERSION: "3.1.1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Select newest Xcode
+        shell: bash
+        run: |
+          XCODE_APP="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          echo "Using ${XCODE_APP}"
+          sudo xcode-select -s "${XCODE_APP}/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          python3 -m pip install --upgrade pip setuptools wheel
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+          brew list pkgconf >/dev/null 2>&1 || brew install pkgconf
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: "${{ env.XMAKE_VERSION }}"
+
+      - name: Restore native dependencies
+        uses: actions/cache@v5
+        with:
+          path: apps/ios/.xmake/packages
+          key: ios-native-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/ios/scripts/build_minirtc_ios.sh', 'xmake.lua', 'deps/submodules/minirtc/xmake.lua') }}
+          restore-keys: |
+            ios-native-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.python-version }}-
+
+      # The first run compiles MiniRTC and its dependencies from source (slow);
+      # later runs reuse the cache above.
+      - name: Build native dependencies
+        timeout-minutes: 90
+        shell: bash
+        env:
+          CONFIGURATION: Release
+          PLATFORM_NAME: iphoneos
+          CURRENT_ARCH: arm64
+          CROSSDESK_NATIVE_VERBOSE: "1"
+        run: |
+          set -o pipefail
+          apps/ios/scripts/build_minirtc_ios.sh 2>&1 | tee "${RUNNER_TEMP}/ios-native-build.log"
+
+      - name: Build app (unsigned)
+        shell: bash
+        run: |
+          set -o pipefail
+          DERIVED_DATA="${RUNNER_TEMP}/DerivedData"
+          echo "DERIVED_DATA=${DERIVED_DATA}" >> "${GITHUB_ENV}"
+          xcodebuild \
+            -project apps/ios/CrossDeskMobile.xcodeproj \
+            -scheme CrossDeskMobile \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "${DERIVED_DATA}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            IPHONEOS_DEPLOYMENT_TARGET="${IOS_DEPLOYMENT_TARGET}" \
+            build 2>&1 | tee "${RUNNER_TEMP}/ios-app-build.log"
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          APP_PATH="${DERIVED_DATA}/Build/Products/Release-iphoneos/CrossDeskMobile.app"
+          test -x "${APP_PATH}/CrossDeskMobile"
+          STAMP="$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)-${GITHUB_SHA::7}"
+          WORK="${RUNNER_TEMP}/ipa"
+          mkdir -p "${WORK}/Payload"
+          cp -R "${APP_PATH}" "${WORK}/Payload/"
+          (cd "${WORK}" && zip -qry "CrossDeskMobile-unsigned-${STAMP}.ipa" Payload)
+          echo "IPA_FILE=${WORK}/CrossDeskMobile-unsigned-${STAMP}.ipa" >> "${GITHUB_ENV}"
+          echo "IPA_NAME=CrossDeskMobile-unsigned-${STAMP}" >> "${GITHUB_ENV}"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.IPA_NAME }}
+          path: ${{ env.IPA_FILE }}
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ios-build-logs-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/ios-native-build.log
+            ${{ runner.temp }}/ios-app-build.log
+            ~/.xmake/cache/packages/**/logs/*.txt
+          include-hidden-files: true
+          if-no-files-found: ignore

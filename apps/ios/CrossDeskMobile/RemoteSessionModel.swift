@@ -15,17 +15,24 @@ enum MouseControlMode: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .absolute: return NSLocalizedString("绝对位置", comment: "")
-        case .relative: return NSLocalizedString("相对位置", comment: "")
+        case .absolute: return NSLocalizedString("触屏模式", comment: "")
+        case .relative: return NSLocalizedString("触控板模式", comment: "")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .absolute: return "hand.point.up.left"
+        case .relative: return "cursorarrow.rays"
         }
     }
 
     var detail: String {
         switch self {
         case .absolute:
-            return NSLocalizedString("触摸位置直接对应远端屏幕位置，适合快速定位。", comment: "")
+            return NSLocalizedString("手指点哪里就操作哪里，放大后单指拖动画面。", comment: "")
         case .relative:
-            return NSLocalizedString("像触控板一样滑动光标，点击时操作当前光标位置。", comment: "")
+            return NSLocalizedString("像笔记本触控板一样滑动光标，轻点操作当前光标位置。", comment: "")
         }
     }
 
