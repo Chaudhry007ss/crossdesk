@@ -86,9 +86,20 @@ jobs:
           PLATFORM_NAME: iphoneos
           CURRENT_ARCH: arm64
           CROSSDESK_NATIVE_VERBOSE: "1"
+          GH_READ_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          apps/ios/scripts/build_minirtc_ios.sh 2>&1 | tee "${RUNNER_TEMP}/ios-native-build.log"
+          # Dependency sources are cloned from public GitHub repositories.
+          # Anonymous lazy fetches from shared runners are sometimes refused
+          # with an auth prompt; send the job's read-only token instead.
+          AUTH="$(printf 'x-access-token:%s' "${GH_READ_TOKEN}" | base64 | tr -d '\n')"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic ${AUTH}"
+          build() { apps/ios/scripts/build_minirtc_ios.sh 2>&1 | tee -a "${RUNNER_TEMP}/ios-native-build.log"; }
+          if ! build; then
+            echo "::warning::Native dependency build failed; retrying once (downloads are resumed)."
+            sleep 20
+            build
+          fi
 
       - name: Build app (unsigned)
         shell: bash
