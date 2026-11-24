@@ -19,11 +19,13 @@ permissions:
 jobs:
   build:
     name: Build unsigned IPA
-    runs-on: macos-latest
+    # Same Xcode 27 image family as the upstream release workflow.
+    runs-on: xcode-27
     timeout-minutes: 150
     env:
       IOS_DEPLOYMENT_TARGET: "16.0"
       XMAKE_VERSION: "3.1.1"
+      PREFERRED_XCODE: "27.1"
 
     steps:
       - name: Checkout code
@@ -32,14 +34,21 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Select newest Xcode
+      - name: Select Xcode
+        id: xcode
         shell: bash
         run: |
-          XCODE_APP="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          # Prefer the Xcode used by upstream releases; fall back to the newest.
+          XCODE_APP="/Applications/Xcode_${PREFERRED_XCODE}.app"
+          if [[ ! -d "${XCODE_APP}" ]]; then
+            XCODE_APP="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          fi
           echo "Using ${XCODE_APP}"
           sudo xcode-select -s "${XCODE_APP}/Contents/Developer"
           xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
+          SDK="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iOS SDK ${SDK}"
+          echo "sdk=${SDK}" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Python
         id: python
@@ -63,9 +72,9 @@ jobs:
         uses: actions/cache@v5
         with:
           path: apps/ios/.xmake/packages
-          key: ios-native-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/ios/scripts/build_minirtc_ios.sh', 'xmake.lua', 'deps/submodules/minirtc/xmake.lua') }}
+          key: ios-native-${{ runner.os }}-${{ runner.arch }}-sdk${{ steps.xcode.outputs.sdk }}-py${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/ios/scripts/build_minirtc_ios.sh', 'xmake.lua', 'deps/submodules/minirtc/xmake.lua') }}
           restore-keys: |
-            ios-native-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.python-version }}-
+            ios-native-${{ runner.os }}-${{ runner.arch }}-sdk${{ steps.xcode.outputs.sdk }}-py${{ steps.python.outputs.python-version }}-
 
       # The first run compiles MiniRTC and its dependencies from source (slow);
       # later runs reuse the cache above.
