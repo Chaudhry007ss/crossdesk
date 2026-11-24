@@ -28,6 +28,7 @@ struct FloatingInputSettings: View {
                            range: InputPreferences.scrollSpeedRange)
             Toggle(NSLocalizedString("自然滚动", comment: ""), isOn: $preferences.naturalScrolling)
             Toggle(NSLocalizedString("滚动惯性", comment: ""), isOn: $preferences.scrollMomentum)
+            Toggle(NSLocalizedString("键盘悬浮按钮", comment: ""), isOn: $preferences.keyboardButtonVisible)
 
             Divider()
             Text(NSLocalizedString("虚拟鼠标", comment: ""))
@@ -68,6 +69,7 @@ struct InputSettingsSection: View {
                            range: InputPreferences.scrollSpeedRange)
             Toggle(NSLocalizedString("自然滚动", comment: ""), isOn: $preferences.naturalScrolling)
             Toggle(NSLocalizedString("滚动惯性", comment: ""), isOn: $preferences.scrollMomentum)
+            Toggle(NSLocalizedString("键盘悬浮按钮", comment: ""), isOn: $preferences.keyboardButtonVisible)
         } header: {
             Text(NSLocalizedString("鼠标控制", comment: ""))
         } footer: {

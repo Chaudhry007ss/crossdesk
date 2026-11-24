@@ -75,6 +75,8 @@ struct RemoteSessionView: View {
     @State private var statusMenuVisible = false
     @State private var statusOrbCenter: CGPoint?
     @GestureState private var statusOrbDragTranslation = CGSize.zero
+    @State private var keyboardButtonCenter: CGPoint?
+    @GestureState private var keyboardButtonDragTranslation = CGSize.zero
 
     var body: some View {
         ZStack {
@@ -167,7 +169,8 @@ struct RemoteSessionView: View {
                             guard count > 1 else { return }
                             mouseInput.releaseAll()
                             session.selectDisplay((session.selectedDisplay + step + count) % count)
-                        }
+                        },
+                        keyboardRevision: keyboardInputVisible ? keyboardMode.rawValue : ""
                     )
                     .frame(width: proxy.size.width, height: proxy.size.height)
                     .allowsHitTesting(session.pixelBuffer != nil)
@@ -473,6 +476,11 @@ struct RemoteSessionView: View {
                     floatingVirtualMouse(in: containerSize)
                 }
 
+                if inputPreferences.keyboardButtonVisible, session.pixelBuffer != nil,
+                   !keyboardInputVisible, !statusMenuVisible {
+                    floatingKeyboardButton(in: containerSize)
+                }
+
                 FloatingMenuLayout(orbCenter: orbCenter, panelWidth: panelWidth) {
                     if statusMenuVisible {
                         FloatingSessionMenu(
@@ -578,6 +586,52 @@ struct RemoteSessionView: View {
                             moved: { self.virtualMouseCenter = $0 })
                 .opacity(inputPreferences.virtualMouseOpacity)
         }
+    }
+
+    /// One-tap keyboard access. Drag to reposition; hidden while a keyboard is up.
+    private func floatingKeyboardButton(in containerSize: CGSize) -> some View {
+        let resting = constrainedKeyboardButtonCenter(
+            keyboardButtonCenter ?? CGPoint(x: 36, y: containerSize.height - 150),
+            in: containerSize)
+        let center = constrainedKeyboardButtonCenter(
+            CGPoint(x: resting.x + keyboardButtonDragTranslation.width,
+                    y: resting.y + keyboardButtonDragTranslation.height),
+            in: containerSize)
+        return Image(systemName: "keyboard")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 46, height: 46)
+            .background(Color.black.opacity(0.62), in: Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.45), lineWidth: 1))
+            .shadow(color: .black.opacity(0.3), radius: 6, y: 2)
+            .opacity(inputPreferences.virtualMouseOpacity)
+            .contentShape(Circle())
+            .position(center)
+            .onTapGesture {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                mouseInput.releaseAll()
+                keyboardInputVisible = true
+            }
+            .gesture(
+                DragGesture(minimumDistance: 4)
+                    .updating($keyboardButtonDragTranslation) { value, state, _ in
+                        state = value.translation
+                    }
+                    .onEnded { value in
+                        keyboardButtonCenter = constrainedKeyboardButtonCenter(
+                            CGPoint(x: resting.x + value.translation.width,
+                                    y: resting.y + value.translation.height),
+                            in: containerSize)
+                    }
+            )
+            .accessibilityLabel(NSLocalizedString("打开键盘", comment: ""))
+            .accessibilityAddTraits(.isButton)
+    }
+
+    private func constrainedKeyboardButtonCenter(_ point: CGPoint, in size: CGSize) -> CGPoint {
+        let margin: CGFloat = 30
+        return CGPoint(x: min(max(point.x, margin), max(margin, size.width - margin)),
+                       y: min(max(point.y, margin), max(margin, size.height - margin)))
     }
 
     private func boundedMouseCenter(_ preferred: CGPoint?, in size: CGSize,

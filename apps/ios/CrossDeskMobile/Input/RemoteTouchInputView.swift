@@ -90,6 +90,8 @@ struct RemoteTouchInputView: UIViewRepresentable {
     var followMouseOpacity: CGFloat = 0.82
     var toggleKeyboard: () -> Void = {}
     var switchDisplay: (Int) -> Void = { _ in }
+    /// Non-empty while a keyboard is shown; changes when its kind changes.
+    var keyboardRevision = ""
 
     func makeUIView(context: Context) -> RemoteTouchSurface {
         RemoteTouchSurface()
@@ -114,6 +116,8 @@ struct RemoteTouchInputView: UIViewRepresentable {
         view.updateFollowMouse(visible: followMouseVisible,
                                scale: followMouseScale,
                                opacity: followMouseOpacity)
+        // After keyboardGeometry, so hiding restores against the full height.
+        view.keyboardRevision = keyboardRevision
     }
 
     static func dismantleUIView(_ view: RemoteTouchSurface, coordinator: ()) {
@@ -287,6 +291,21 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
     private var followMouse: FollowMouseView?
     private var followMouseScale: CGFloat = 1
 
+    /// While a keyboard is shown the view is lifted so the text caret (the
+    /// last click point) stays visible above it, then restored on hide.
+    var keyboardRevision = "" {
+        didSet {
+            guard keyboardRevision != oldValue else { return }
+            if keyboardRevision.isEmpty {
+                restoreAfterKeyboard()
+            } else {
+                scheduleKeyboardReveal()
+            }
+        }
+    }
+    private var keyboardRevealWork: [DispatchWorkItem] = []
+    private var viewportBeforeKeyboard: (scale: CGFloat, offset: CGSize, edgePanned: Bool)?
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
@@ -375,6 +394,57 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         let hover = UIHoverGestureRecognizer(target: self,
                                              action: #selector(handleHover(_:)))
         addGestureRecognizer(hover)
+
+        // The system keyboard can change height after it appears (emoji,
+        // candidates, dictation); re-check that the caret is still visible.
+        NotificationCenter.default.addObserver(self, selector: #selector(systemKeyboardDidShow),
+                                               name: UIResponder.keyboardDidShowNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(systemKeyboardDidShow),
+                                               name: UIResponder.keyboardDidChangeFrameNotification, object: nil)
+    }
+
+    // MARK: - Keyboard avoidance
+
+    @objc private func systemKeyboardDidShow() {
+        guard !keyboardRevision.isEmpty else { return }
+        revealCursorAboveKeyboard()
+    }
+
+    private func scheduleKeyboardReveal() {
+        keyboardRevealWork.forEach { $0.cancel() }
+        // Keyboards animate in and are measured after layout; try a few times.
+        keyboardRevealWork = [0.05, 0.3, 0.6].map { delay in
+            let work = DispatchWorkItem { [weak self] in self?.revealCursorAboveKeyboard() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return work
+        }
+    }
+
+    private func revealCursorAboveKeyboard() {
+        guard !keyboardRevision.isEmpty, let geometry = keyboardGeometry,
+              let rect = renderRect(), rect.height > 0 else { return }
+        let visibleHeight = geometry.visibleHeight(in: self)
+        guard visibleHeight > 80, visibleHeight < bounds.height - 1 else { return }
+        let cursorY = rect.minY + CGFloat(relativeCursorPoint.1) * rect.height
+        // Keep the caret line plus a little context above the keyboard.
+        let target = visibleHeight - min(64, visibleHeight * 0.25)
+        guard cursorY > target else { return }
+        if viewportBeforeKeyboard == nil {
+            viewportBeforeKeyboard = (viewportScale, viewportOffset, edgePanned)
+        }
+        panForPointer(dx: 0, dy: target - cursorY)
+    }
+
+    private func restoreAfterKeyboard() {
+        keyboardRevealWork.forEach { $0.cancel() }
+        keyboardRevealWork.removeAll()
+        guard let saved = viewportBeforeKeyboard else { return }
+        viewportBeforeKeyboard = nil
+        // Keep the user's own zoom if they changed it while typing.
+        guard abs(saved.scale - viewportScale) < 0.001 else { return }
+        edgePanned = saved.edgePanned
+        viewportOffset = constrainedViewportOffset(saved.offset, scale: viewportScale)
+        publishViewport()
     }
 
     required init?(coder: NSCoder) {

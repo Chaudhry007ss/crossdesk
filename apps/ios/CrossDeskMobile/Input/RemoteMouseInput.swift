@@ -161,6 +161,7 @@ final class InputPreferences: ObservableObject {
         static let mouseOpacity = "crossdesk.mobile.input.virtual-mouse-opacity"
         static let mouseScale = "crossdesk.mobile.input.virtual-mouse-scale"
         static let guideShown = "crossdesk.mobile.input.gesture-guide-shown"
+        static let keyboardButton = "crossdesk.mobile.input.keyboard-button"
     }
 
     private let defaults: UserDefaults
@@ -192,6 +193,10 @@ final class InputPreferences: ObservableObject {
     @Published var gestureGuideShown: Bool {
         didSet { defaults.set(gestureGuideShown, forKey: Key.guideShown) }
     }
+    /// A draggable floating button that opens the keyboard in one tap.
+    @Published var keyboardButtonVisible: Bool {
+        didSet { defaults.set(keyboardButtonVisible, forKey: Key.keyboardButton) }
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -212,5 +217,6 @@ final class InputPreferences: ObservableObject {
         virtualMouseOpacity = double(Key.mouseOpacity, 0.82, Self.opacityRange)
         virtualMouseScale = double(Key.mouseScale, 1, 0.85...1.2)
         gestureGuideShown = bool(Key.guideShown, false)
+        keyboardButtonVisible = bool(Key.keyboardButton, true)
     }
 }
