@@ -98,7 +98,7 @@ struct RemoteSessionView: View {
 
                             if let cursorPosition,
                                session.pixelBuffer != nil,
-                               !followMouseActive {
+                               !fusedCursorPointerActive {
                                 RemoteCursorOverlay(
                                     normalizedPosition: cursorPosition,
                                     normalizedVisualOffset:
@@ -738,10 +738,17 @@ struct RemoteSessionView: View {
         )
     }
 
-    /// The fused mouse draws its own pointer tip, replacing the cursor glyph.
+    /// True when the mouse-shaped control is shown inside the touch surface
+    /// (following the cursor in trackpad mode, parked top-right in touch mode).
     private var followMouseActive: Bool {
         virtualMouseVisible && session.pixelBuffer != nil &&
             inputPreferences.virtualMouseStyle == .cursorFollow
+    }
+
+    /// The fused mouse draws its own pointer tip only in trackpad mode,
+    /// replacing the separate cursor glyph there.
+    private var fusedCursorPointerActive: Bool {
+        followMouseActive && session.mouseControlMode == .relative
     }
 
     private var visibleCursorShape: Int {

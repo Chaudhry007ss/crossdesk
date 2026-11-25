@@ -237,6 +237,28 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
             hoverLastLocation = nil
             singleFingerViewportPan = false
             stopMomentum()
+            if controlMode == .absolute && followMousePanned && keyboardRevision.isEmpty {
+                followMousePanned = false
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.controlMode == .absolute,
+                          self.keyboardRevision.isEmpty else { return }
+                    if self.viewportScale <= 1.001 {
+                        self.edgePanned = false
+                        self.viewportOffset = .zero
+                    } else {
+                        self.viewportOffset = self.constrainedViewportOffset(
+                            self.viewportOffset, scale: self.viewportScale)
+                    }
+                    self.publishViewport()
+                }
+            } else if controlMode == .relative && followMouse != nil && keyboardRevision.isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.adjustViewportForFollowMouse(allowRelax: false)
+                    self.layoutFollowMouse()
+                }
+            }
+            layoutFollowMouse()
         }
     }
     var onMove: ((Float, Float) -> Void)?
@@ -452,7 +474,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
             self.viewportOffset = self.constrainedViewportOffset(saved.offset,
                                                                  scale: self.viewportScale)
             self.publishViewport()
-            if self.followMouse != nil {
+            if self.isMouseFollowingCursor {
                 self.adjustViewportForFollowMouse(allowRelax: true)
             }
         }
@@ -531,6 +553,12 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
 
     // MARK: - Cursor-following virtual mouse
 
+    /// True only when the mouse control follows the remote cursor (trackpad
+    /// mode). In touch mode it stays parked in the top-right without a pointer.
+    private var isMouseFollowingCursor: Bool {
+        followMouse != nil && controlMode == .relative
+    }
+
     private var followMouseSize: CGSize {
         CGSize(width: FollowMouseView.baseSize.width * followMouseScale,
                height: FollowMouseView.baseSize.height * followMouseScale)
@@ -539,7 +567,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
     /// Space below and right of the cursor tip needed to keep the full fused
     /// mouse (left/right buttons, wheel, and drag body) inside the screen.
     private var followMousePadding: CGSize {
-        guard followMouse != nil else { return .zero }
+        guard isMouseFollowingCursor else { return .zero }
         let offset = FollowMouseView.tipOffset * followMouseScale
         let margin: CGFloat = 8
         let size = followMouseSize
@@ -595,7 +623,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
     /// bottom (e.g. taskbar) or right edge. At 1x zoom, smoothly relaxes back
     /// to center as the cursor moves away from those edges.
     private func adjustViewportForFollowMouse(allowRelax: Bool) {
-        guard followMouse != nil, keyboardRevision.isEmpty,
+        guard isMouseFollowingCursor, keyboardRevision.isEmpty,
               let baseRect = baseRenderRect(),
               let rect = renderRect(),
               rect.width > 0, rect.height > 0 else { return }
@@ -662,6 +690,20 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         }
         mouse.isHidden = false
         let size = followMouseSize
+        if controlMode == .absolute {
+            mouse.showsPointer = false
+            let margin: CGFloat = 12
+            // Park in the top-right corner, below the 54 pt status orb
+            // (whose resting bottom sits near y = 71).
+            let x = max(margin, bounds.width - safeAreaInsets.right - size.width - margin)
+            let preferredY = safeAreaInsets.top + 80
+            let maxY = max(safeAreaInsets.top + 8,
+                           bounds.height - safeAreaInsets.bottom - size.height - 8)
+            let frame = CGRect(origin: CGPoint(x: x, y: min(preferredY, maxY)), size: size)
+            if mouse.frame != frame { mouse.frame = frame }
+            return
+        }
+        mouse.showsPointer = true
         let (nx, ny) = relativeCursorPoint
         let cursor = CGPoint(x: rect.minX + CGFloat(nx) * rect.width,
                              y: rect.minY + CGFloat(ny) * rect.height)
@@ -1187,7 +1229,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
         let (x, y) = relativeCursorPoint
         let nextX = Float(min(max(CGFloat(x) + delta.x / renderRect.width, 0), 1))
         let nextY = Float(min(max(CGFloat(y) + delta.y / renderRect.height, 0), 1))
-        if followMouse != nil && keyboardRevision.isEmpty {
+        if isMouseFollowingCursor && keyboardRevision.isEmpty {
             relativeCursorPoint = (nextX, nextY)
             adjustViewportForFollowMouse(allowRelax: true)
             layoutFollowMouse()
@@ -1295,7 +1337,7 @@ final class RemoteTouchSurface: UIView, UIGestureRecognizerDelegate {
             minimumY = visibleHeight - baseRect.midY - halfHeight
             maximumY = availableHeight - visibleHeight - baseRect.midY + halfHeight
 
-            if followMouse != nil {
+            if isMouseFollowingCursor {
                 let rightLimit = bounds.width - safeAreaInsets.right
                 let pad = followMousePadding
                 let halfWidth = baseRect.width * scale / 2

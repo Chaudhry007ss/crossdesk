@@ -432,9 +432,14 @@ final class FollowMouseView: UIView {
     static let tipOffset: CGFloat = 12
 
     let input: RemoteMouseInput
+    /// Draws the fused top-left pointer tail and white tip. Disabled in touch
+    /// mode where the mouse stays parked in the top-right corner.
+    var showsPointer = true {
+        didSet { if showsPointer != oldValue { updateShell() } }
+    }
     /// The cursor hotspot in this view's coordinates; normally up-left of the body.
     var tip = CGPoint(x: -FollowMouseView.tipOffset, y: -FollowMouseView.tipOffset) {
-        didSet { if tip != oldValue { updateShell() } }
+        didSet { if showsPointer, tip != oldValue { updateShell() } }
     }
     private let leftKey: VirtualMouseKey
     private let wheelKey: VirtualMouseKey
@@ -504,39 +509,49 @@ final class FollowMouseView: UIView {
     }
 
     /// One closed outline: the rounded body with its top-left corner replaced by
-    /// a tail that runs to the hotspot.
+    /// a tail that runs to the hotspot (or a plain rounded shell when parked).
     private func updateShell() {
         let width = bounds.width
         let height = bounds.height
         guard width > 0, height > 0 else { return }
         let r = cornerRadius
-        let path = UIBezierPath()
-        path.move(to: tip)
-        path.addLine(to: CGPoint(x: r, y: 0))
-        path.addLine(to: CGPoint(x: width - r, y: 0))
-        path.addArc(withCenter: CGPoint(x: width - r, y: r), radius: r,
-                    startAngle: -.pi / 2, endAngle: 0, clockwise: true)
-        path.addLine(to: CGPoint(x: width, y: height - r))
-        path.addArc(withCenter: CGPoint(x: width - r, y: height - r), radius: r,
-                    startAngle: 0, endAngle: .pi / 2, clockwise: true)
-        path.addLine(to: CGPoint(x: r, y: height))
-        path.addArc(withCenter: CGPoint(x: r, y: height - r), radius: r,
-                    startAngle: .pi / 2, endAngle: .pi, clockwise: true)
-        path.addLine(to: CGPoint(x: 0, y: r))
-        path.close()
+        let path: UIBezierPath
+        if showsPointer {
+            path = UIBezierPath()
+            path.move(to: tip)
+            path.addLine(to: CGPoint(x: r, y: 0))
+            path.addLine(to: CGPoint(x: width - r, y: 0))
+            path.addArc(withCenter: CGPoint(x: width - r, y: r), radius: r,
+                        startAngle: -.pi / 2, endAngle: 0, clockwise: true)
+            path.addLine(to: CGPoint(x: width, y: height - r))
+            path.addArc(withCenter: CGPoint(x: width - r, y: height - r), radius: r,
+                        startAngle: 0, endAngle: .pi / 2, clockwise: true)
+            path.addLine(to: CGPoint(x: r, y: height))
+            path.addArc(withCenter: CGPoint(x: r, y: height - r), radius: r,
+                        startAngle: .pi / 2, endAngle: .pi, clockwise: true)
+            path.addLine(to: CGPoint(x: 0, y: r))
+            path.close()
+        } else {
+            path = UIBezierPath(roundedRect: bounds, cornerRadius: r)
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         shell.frame = bounds
         shell.path = path.cgPath
         shell.shadowPath = path.cgPath
-        let marker = UIBezierPath()
-        let size = max(8, Self.tipOffset * 0.85 * width / Self.baseSize.width)
-        marker.move(to: tip)
-        marker.addLine(to: CGPoint(x: tip.x + size, y: tip.y + size * 0.42))
-        marker.addLine(to: CGPoint(x: tip.x + size * 0.42, y: tip.y + size))
-        marker.close()
-        tipMarker.frame = bounds
-        tipMarker.path = marker.cgPath
+        tipMarker.isHidden = !showsPointer
+        if showsPointer {
+            let marker = UIBezierPath()
+            let size = max(8, Self.tipOffset * 0.85 * width / Self.baseSize.width)
+            marker.move(to: tip)
+            marker.addLine(to: CGPoint(x: tip.x + size, y: tip.y + size * 0.42))
+            marker.addLine(to: CGPoint(x: tip.x + size * 0.42, y: tip.y + size))
+            marker.close()
+            tipMarker.frame = bounds
+            tipMarker.path = marker.cgPath
+        } else {
+            tipMarker.path = nil
+        }
         CATransaction.commit()
     }
 
